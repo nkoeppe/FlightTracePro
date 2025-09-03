@@ -1,0 +1,15 @@
+services:
+  navmap:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: navmap
+    restart: unless-stopped
+    networks:
+      - proxy
+
+networks:
+  proxy:
+    external: true
+    name: proxy
+
