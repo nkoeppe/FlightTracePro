@@ -1,0 +1,20 @@
+version: "3.8"
+
+services:
+  navmap:
+    build:
+      context: .
+      dockerfile: server/Dockerfile
+    container_name: navmap-dev
+    ports:
+      - "8000:8000"
+    environment:
+      - LIVE_POST_KEY=${LIVE_POST_KEY:-}
+      - CESIUM_ION_TOKEN=${CESIUM_ION_TOKEN:-}
+    # Hot-reload and live-edit server/static during development
+    # Use same entrypoint as prod for WebSocket stability (no reload)
+    command: ["--host", "0.0.0.0", "--port", "8000"]
+    volumes:
+      - ./server/app.py:/app/app.py:ro
+      - ./server/gpx_to_kml.py:/app/gpx_to_kml.py:ro
+      - ./static:/app/static:ro

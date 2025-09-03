@@ -2,7 +2,7 @@ services:
   navmap:
     build:
       context: .
-      dockerfile: Dockerfile
+      dockerfile: server/Dockerfile
     container_name: navmap
     restart: unless-stopped
     ports:
@@ -10,6 +10,7 @@ services:
     environment:
       - CESIUM_ION_TOKEN=${CESIUM_ION_TOKEN:-}
       - CESIUM_ION_TOKEN_FILE=/run/secrets/cesium_ion_token
+      - LIVE_POST_KEY=${LIVE_POST_KEY:-}
     secrets:
       - cesium_ion_token
     networks:

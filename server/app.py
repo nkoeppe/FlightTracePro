@@ -1,7 +1,11 @@
-from fastapi import FastAPI, File, UploadFile, Form, HTTPException
+from fastapi import FastAPI, File, UploadFile, Form, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.responses import StreamingResponse, HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
+from datetime import datetime, timezone
+import logging
+import asyncio
 import gpxpy
 import simplekml
 from io import StringIO, BytesIO
@@ -10,7 +14,13 @@ from uuid import uuid4
 import os
 
 
-app = FastAPI(title="GPX → KML Converter", version="1.0.0")
+app = FastAPI(title="NavMap – GPX→KML + Live", version="1.1.0")
+
+# Logger
+logger = logging.getLogger("navmap")
+if not logger.handlers:
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+logger.setLevel(logging.INFO)
 
 app.add_middleware(
     CORSMiddleware,
@@ -26,6 +36,66 @@ app.mount("/static", StaticFiles(directory="static", check_dir=False), name="sta
 
 # Simple in-memory KML store to provide a link for Google Earth
 KML_STORE: dict[str, bytes] = {}
+
+# Live map data structures
+class LiveSample(BaseModel):
+    lat: float
+    lon: float
+    alt_m: float | None = None
+    spd_kt: float | None = None
+    vsi_ms: float | None = None
+    hdg_deg: float | None = None
+    pitch_deg: float | None = None
+    roll_deg: float | None = None
+    ts: float | None = None  # epoch seconds
+    callsign: str | None = None
+    aircraft: str | None = None
+
+class ChannelState:
+    def __init__(self):
+        self.connections: set[WebSocket] = set()
+        self.viewers: set[WebSocket] = set()
+        self.feeders: set[WebSocket] = set()
+        self.last_samples: dict[str, tuple[LiveSample, float]] = {}
+        self.lock = asyncio.Lock()
+        self.active_callsigns: set[str] = set()
+        self.history: dict[str, list[dict]] = {}
+        self.history_max = 5000
+
+CHANNELS: dict[str, ChannelState] = {}
+
+def get_channel(name: str) -> ChannelState:
+    st = CHANNELS.get(name)
+    if not st:
+        st = ChannelState()
+        CHANNELS[name] = st
+    return st
+
+LIVE_POST_KEY = os.environ.get("LIVE_POST_KEY", "").strip()
+LIVE_TTL_SEC = int(os.environ.get("LIVE_TTL_SEC", "60") or "60")
+
+
+async def _broadcast_viewers(st: ChannelState, data: dict):
+    dead = []
+    for ws in list(st.viewers):
+        try:
+            await ws.send_json(data)
+        except Exception:
+            dead.append(ws)
+    for ws in dead:
+        st.viewers.discard(ws)
+        st.connections.discard(ws)
+
+
+def _prune_stale_locked(st: ChannelState, now_ts: float) -> list[str]:
+    removed = []
+    stale = [cs for cs, (_, t) in st.last_samples.items() if now_ts - t > LIVE_TTL_SEC]
+    for cs in stale:
+        st.last_samples.pop(cs, None)
+        if cs in st.active_callsigns:
+            st.active_callsigns.discard(cs)
+            removed.append(cs)
+    return removed
 
 
 def convert_gpx_to_kml(
@@ -221,6 +291,204 @@ def index():
     return INDEX_HTML.replace("__CESIUM_ION_TOKEN__", token)
 
 
+@app.get("/api/live/{channel}/recent")
+async def live_recent(channel: str):
+    st = get_channel(channel)
+    now = datetime.now(timezone.utc).timestamp()
+    out = []
+    async with st.lock:
+        _prune_stale_locked(st, now)
+        for _, (s, t) in st.last_samples.items():
+            if now - t <= LIVE_TTL_SEC:
+                out.append(s.dict())
+    return {"channel": channel, "samples": out, "ts": now}
+
+
+@app.get("/api/live/{channel}/info")
+async def live_info(channel: str):
+    st = get_channel(channel)
+    now = datetime.now(timezone.utc).timestamp()
+    async with st.lock:
+        # prune stale players
+        stale = [cs for cs, (_, t) in st.last_samples.items() if now - t > LIVE_TTL_SEC]
+        for cs in stale:
+            st.last_samples.pop(cs, None)
+        players = []
+        for cs, (s, t) in st.last_samples.items():
+            d = s.dict()
+            d.update({"callsign": cs, "ts": t, "age_s": max(0.0, now - t)})
+            players.append(d)
+        return {
+            "channel": channel,
+            "ts": now,
+            "counts": {
+                "connections": len(st.connections),
+                "viewers": len(st.viewers),
+                "feeders": len(st.feeders),
+                "players": len(players),
+            },
+            "players": players,
+        }
+
+
+@app.get("/api/live/{channel}/history")
+async def live_history(channel: str):
+    st = get_channel(channel)
+    async with st.lock:
+        out = { cs: (st.history.get(cs) or []) for cs in st.active_callsigns }
+    return {"channel": channel, "tracks": out}
+
+
+@app.post("/api/live/{channel}")
+async def live_post(channel: str, sample: LiveSample, key: str | None = None):
+    if LIVE_POST_KEY and (not key or key != LIVE_POST_KEY):
+        raise HTTPException(status_code=403, detail="forbidden")
+    st = get_channel(channel)
+    now = datetime.now(timezone.utc).timestamp()
+    if not sample.ts:
+        sample.ts = now
+    callsign = sample.callsign or "n/a"
+    async with st.lock:
+        st.last_samples[callsign] = (sample, now)
+        is_new = callsign not in st.active_callsigns
+        st.active_callsigns.add(callsign)
+        # append to history
+        hist = st.history.get(callsign) or []
+        item = sample.dict()
+        item['ts'] = sample.ts
+        hist.append(item)
+        if len(hist) > st.history_max:
+            del hist[: len(hist) - st.history_max]
+        st.history[callsign] = hist
+        # broadcast to viewers only
+        data = {"type": "state", "payload": sample.dict()}
+        await _broadcast_viewers(st, data)
+        # prune and emit leave events
+        removed = _prune_stale_locked(st, now)
+    try:
+        logger.info(
+            "[live] POST ch=%s cs=%s lat=%.5f lon=%.5f alt=%s viewers=%d",
+            channel,
+            callsign,
+            float(sample.lat),
+            float(sample.lon),
+            ("%.0f" % float(sample.alt_m)) if sample.alt_m is not None else "n/a",
+            int(len(st.viewers)),
+        )
+    except Exception:
+        pass
+    # Emit join/leave events outside lock
+    try:
+        if is_new:
+            await _broadcast_viewers(st, {"type":"event","event":"join","callsign":callsign, "ts": now})
+        for cs in removed:
+            await _broadcast_viewers(st, {"type":"event","event":"leave","callsign":cs, "ts": now})
+    except Exception:
+        pass
+    return {"ok": True}
+
+
+@app.websocket("/ws/live/{channel}")
+async def ws_live(websocket: WebSocket, channel: str):
+    # Extract query params from WebSocket URL
+    try:
+        qp = websocket.query_params or {}
+    except Exception:
+        qp = {}
+    mode = qp.get("mode", "viewer")
+    key = qp.get("key")
+    is_feeder = (mode == "feeder")
+    if is_feeder and LIVE_POST_KEY and (not key or key != LIVE_POST_KEY):
+        await websocket.close(code=4403)
+        return
+    await websocket.accept()
+    st = get_channel(channel)
+    client_addr = None
+    try:
+        client_addr = getattr(websocket, "client", None)
+    except Exception:
+        client_addr = None
+    async with st.lock:
+        st.connections.add(websocket)
+        (st.feeders if is_feeder else st.viewers).add(websocket)
+    try:
+        logger.info("[ws] connect ch=%s mode=%s from=%s", channel, ("feeder" if is_feeder else "viewer"), str(client_addr))
+    except Exception:
+        pass
+    try:
+        if not is_feeder:
+            now = datetime.now(timezone.utc).timestamp()
+            async with st.lock:
+                recent = 0
+                for _, (s, t) in st.last_samples.items():
+                    if now - t <= LIVE_TTL_SEC:
+                        await websocket.send_json({"type": "state", "payload": s.dict()})
+                        recent += 1
+            try:
+                logger.info("[ws] init ch=%s recent=%d", channel, int(recent))
+            except Exception:
+                pass
+        while True:
+            msg = await websocket.receive_json()
+            if not isinstance(msg, dict) or msg.get("type") != "state":
+                continue
+            try:
+                sample = LiveSample(**msg.get("payload", {}))
+            except Exception:
+                continue
+            now = datetime.now(timezone.utc).timestamp()
+            if not sample.ts:
+                sample.ts = now
+            callsign = sample.callsign or "n/a"
+            async with st.lock:
+                st.last_samples[callsign] = (sample, now)
+                is_new = callsign not in st.active_callsigns
+                st.active_callsigns.add(callsign)
+                # append to history
+                hist = st.history.get(callsign) or []
+                item = sample.dict(); item['ts'] = sample.ts
+                hist.append(item)
+                if len(hist) > st.history_max:
+                    del hist[: len(hist) - st.history_max]
+                st.history[callsign] = hist
+                data = {"type": "state", "payload": sample.dict()}
+                await _broadcast_viewers(st, data)
+                removed = _prune_stale_locked(st, now)
+            try:
+                logger.info(
+                    "[ws] state ch=%s cs=%s lat=%.5f lon=%.5f alt=%s viewers=%d",
+                    channel,
+                    callsign,
+                    float(sample.lat),
+                    float(sample.lon),
+                    ("%.0f" % float(sample.alt_m)) if sample.alt_m is not None else "n/a",
+                    int(len(st.viewers)),
+                )
+            except Exception:
+                pass
+            # Emit join/leave events outside lock
+            try:
+                if is_new:
+                    await _broadcast_viewers(st, {"type":"event","event":"join","callsign":callsign, "ts": now})
+                for cs in removed:
+                    await _broadcast_viewers(st, {"type":"event","event":"leave","callsign":cs, "ts": now})
+            except Exception:
+                pass
+    except WebSocketDisconnect as e:
+        try:
+            logger.info("[ws] disconnect ch=%s mode=%s from=%s code=%s", channel, ("feeder" if is_feeder else "viewer"), str(client_addr), getattr(e, 'code', ''))
+        except Exception:
+            pass
+    except Exception:
+        # Ignore client errors
+        pass
+    finally:
+        async with st.lock:
+            st.connections.discard(websocket)
+            st.viewers.discard(websocket)
+            st.feeders.discard(websocket)
+
+
 @app.post("/api/convert")
 async def api_convert(
     file: UploadFile = File(..., description="GPX file"),
@@ -332,7 +600,7 @@ INDEX_HTML = """
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>GPX → KML Converter</title>
+    <title>NavMap – Converter + Live</title>
     <script>window.CESIUM_ION_TOKEN='__CESIUM_ION_TOKEN__';</script>
     <script>
       // Guard for extensions expecting a geoLocationStorage global
@@ -345,6 +613,11 @@ INDEX_HTML = """
     <style>
       :root { color-scheme: light dark; }
       body { font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; margin: 0; padding: 0; }
+      header { background: #0f172a; color: #fff; padding: 12px 18px; display:flex; align-items:center; gap:12px; }
+      header h1 { font-size: 16px; margin: 0; font-weight:700; }
+      .topnav { display:flex; gap:8px; margin-left:auto; }
+      .topnav button { background:#1f2937; color:#e5e7eb; border:1px solid #334155; padding:6px 10px; border-radius:6px; cursor:pointer; }
+      .topnav button.active { background:#2563eb; border-color:#2563eb; color:#fff; }
       .container { max-width: 1200px; margin: 24px auto; padding: 24px; }
       .card { border: 1px solid #ddd; border-radius: 12px; padding: 24px; }
       h1 { margin-top: 0; }
@@ -365,8 +638,8 @@ INDEX_HTML = """
       .preview-tabs { display: flex; gap: 8px; padding: 8px; border-bottom: 1px solid #eee; align-items: center; flex-wrap: wrap; }
       .tabbtn { background: #f3f4f6; color: #111; border: 1px solid #ddd; padding: 4px 8px; border-radius: 6px; cursor: pointer; font-weight: 600; }
       .tabbtn.active { background: #2563eb; color: #fff; border-color: #2563eb; }
-      #map, #globe { flex: 1 1 auto; height: calc(100% - 40px); width: 100%; display: none; }
-      #map.active, #globe.active { display: block; }
+      #map, #globe, #livemap, #liveglobe { flex: 1 1 auto; height: calc(100% - 40px); width: 100%; display: none; }
+      #map.active, #globe.active, #livemap.active, #liveglobe.active { display: block; }
       .hud { position: absolute; right: 8px; bottom: 8px; background: rgba(0,0,0,0.55); color:#fff; padding:6px 8px; border-radius:6px; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; line-height: 1.2; }
       /* Telemetry panel (SpaceX-style) */
       .telemetry { position:absolute; left:8px; bottom:8px; right:auto; display:flex; gap:8px; flex-wrap:wrap; align-items:flex-end; }
@@ -378,12 +651,27 @@ INDEX_HTML = """
       .inline { display:flex; align-items:center; gap:6px; }
       .small { font-size: 12px; }
       footer { margin-top: 24px; font-size: 12px; color: #666; text-align: center; }
+      /* Live events panel (light/dark aware) */
+      #live_events { font-size:12px; border:1px solid #eee; border-radius:8px; padding:8px; max-height: 140px; overflow:auto; background:#fafafa; color:#111; }
+      @media (prefers-color-scheme: dark) {
+        #live_events { background: #0f172a; color: #e5e7eb; border-color: #334155; }
+      }
+      /* Aircraft icon wrapper for rotation */
+      .ac-icon .ac-rot { display:inline-block; transform-origin: 50% 50%; }
     </style>
   </head>
   <body>
+    <header>
+      <h1>NavMap</h1>
+      <div class="topnav">
+        <button id="nav-conv" class="active">Converter</button>
+        <button id="nav-live">Live Map</button>
+      </div>
+    </header>
     <div class="container">
+      <div id="view-conv" style="display:block;">
       <div class="card">
-        <h1>GPX → KML Converter</h1>
+        <h1>Converter</h1>
         <p>Upload a <strong>.gpx</strong> file and download a <strong>.kml</strong>.</p>
         <form id="form">
           <label for="file">GPX file</label>
@@ -525,6 +813,61 @@ INDEX_HTML = """
             </div>
           </div>
       </div>
+      </div>
+
+      <div id="view-live" style="display:none;">
+      <div class="card" id="live_card">
+        <h2>Live Map</h2>
+        <p class="note">Join a shared channel and see live positions from bridge clients. Share the channel name with friends.</p>
+        <div style="display:flex; gap:12px; align-items:flex-end; flex-wrap:wrap; margin: 12px 0;">
+          <div>
+            <label class="lbl" for="live_channel">Channel</label>
+            <input id="live_channel" value="default" />
+          </div>
+          <div>
+            <label class="lbl" for="live_callsign">Callsign</label>
+            <input id="live_callsign" placeholder="N123AB" />
+          </div>
+          <div>
+            <label class="lbl" for="live_key">Post Key (if server requires)</label>
+            <input id="live_key" placeholder="optional" />
+          </div>
+          <div>
+            <label class="lbl">Controls</label><br/>
+            <button id="live_connect" type="button">Connect</button>
+            <button id="live_disconnect" type="button">Disconnect</button>
+            <button id="live_center" type="button">Center</button>
+          </div>
+          <div class="note" id="live_status" style="margin-left:auto;">disconnected</div>
+        </div>
+        <div class="note" id="live_meta">Viewers: 0 • Feeders: 0 • Players: 0</div>
+        <div class="note small" id="live_players_list" style="margin:6px 0 8px 0;">Players: -</div>
+        <div id="live_events" style="font-size:12px; border:1px solid #eee; border-radius:8px; padding:8px; max-height: 140px; overflow:auto; background:#fafafa;">
+          <div class="note">Events will appear here…</div>
+        </div>
+        <div class="preview" id="live_preview">
+          <div class="preview-tabs">
+            <button id="live-tab-2d" class="tabbtn active" type="button">2D Map</button>
+            <button id="live-tab-3d" class="tabbtn" type="button">3D Globe</button>
+            <button id="live_follow2d" class="tabbtn" type="button">Follow 2D</button>
+            <button id="live_follow3d" class="tabbtn" type="button">Follow 3D</button>
+            <button id="live_home3d" class="tabbtn" type="button">Home 3D</button>
+            <span class="note" style="margin-left:auto;">Channel: <span id="live_ch_label">default</span></span>
+          </div>
+          <div id="livemap" class="active"></div>
+          <div id="liveglobe"></div>
+          <div id="live_hud" class="telemetry" style="display:flex; margin-top:6px;">
+            <div class="tile"><div class="label">ALT</div><div class="value"><span id="lv_alt">-</span><span class="unit">m</span></div></div>
+            <div class="tile"><div class="label">SPD</div><div class="value"><span id="lv_spd">-</span><span class="unit">kt</span></div></div>
+            <div class="tile"><div class="label">VSI</div><div class="value"><span id="lv_vsi">-</span><span class="unit">m/s</span></div></div>
+            <div class="tile"><div class="label">HDG</div><div class="value"><span id="lv_hdg">-</span><span class="unit">°</span></div></div>
+            <div class="tile"><div class="label">PITCH</div><div class="value"><span id="lv_pitch">-</span><span class="unit">°</span></div></div>
+            <div class="tile"><div class="label">ROLL</div><div class="value"><span id="lv_roll">-</span><span class="unit">°</span></div></div>
+          </div>
+        </div>
+      </div>
+      </div>
+
       <footer>
         Powered by FastAPI, GPXPy, and simplekml.
       </footer>
@@ -550,6 +893,23 @@ INDEX_HTML = """
           }
         });
       }
+
+      // Top navigation between Converter and Live views
+      const navConv = document.getElementById('nav-conv');
+      const navLive = document.getElementById('nav-live');
+      const viewConv = document.getElementById('view-conv');
+      const viewLive = document.getElementById('view-live');
+      function setTopTab(tab){
+        const isConv = (tab==='conv');
+        navConv.classList.toggle('active', isConv);
+        navLive.classList.toggle('active', !isConv);
+        viewConv.style.display = isConv ? 'block' : 'none';
+        viewLive.style.display = isConv ? 'none' : 'block';
+        if (!isConv) ensureLiveMap().then(()=> setTimeout(()=> liveMap && liveMap.invalidateSize(), 50));
+        if (isConv) ensureMap().then(()=> setTimeout(()=> map && map.invalidateSize(), 50));
+      }
+      navConv.addEventListener('click', () => setTopTab('conv'));
+      navLive.addEventListener('click', () => setTopTab('live'));
 
       const form = document.getElementById('form');
       const statusEl = document.getElementById('status');
@@ -650,6 +1010,8 @@ INDEX_HTML = """
         L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
           maxZoom: 19, attribution: '&copy; OpenStreetMap contrib.'
         }).addTo(map);
+        // Ensure a valid view exists even before any GPX is loaded
+        try { map.setView([20, 0], 2); } catch(_) {}
         trackLayer = L.layerGroup().addTo(map);
         wptLayer = L.layerGroup().addTo(map);
         planLayer = L.layerGroup().addTo(map);
@@ -1812,6 +2174,316 @@ function parseOpenAir(text){
       showAirspaces.addEventListener('change', ()=>{ renderOverlays2D(); ensureGlobe(()=>renderOverlays3D()); });
       showAirports.addEventListener('change', ()=>{ renderOverlays2D(); ensureGlobe(()=>renderOverlays3D()); });
       aspAltInput.addEventListener('change', ()=>{ renderOverlays2D(); ensureGlobe(()=>renderOverlays3D()); });
+
+      // --- Live Map logic ---
+      let liveMap = null, liveLayer = null;
+      let liveWs = null;
+      let liveMarkers = new Map();
+      let liveTracks = new Map();
+      let liveLines = new Map();
+      let liveLastTs = new Map();
+      let liveChannel = 'default';
+      const liveChInput = document.getElementById('live_channel');
+      const liveChLabel = document.getElementById('live_ch_label');
+      const liveCallsign = document.getElementById('live_callsign');
+      const liveKey = document.getElementById('live_key');
+      const liveStatus = document.getElementById('live_status');
+      const liveConnectBtn = document.getElementById('live_connect');
+      const liveDisconnectBtn = document.getElementById('live_disconnect');
+      const liveCenterBtn = document.getElementById('live_center');
+      const liveMeta = document.getElementById('live_meta');
+      const livePlayersList = document.getElementById('live_players_list');
+      const liveEventsEl = document.getElementById('live_events');
+      // Live telemetry elements
+      const lvAlt = document.getElementById('lv_alt');
+      const lvSpd = document.getElementById('lv_spd');
+      const lvVsi = document.getElementById('lv_vsi');
+      const lvHdg = document.getElementById('lv_hdg');
+      const lvPitch = document.getElementById('lv_pitch');
+      const lvRoll = document.getElementById('lv_roll');
+      let liveInfoTimer = null;
+      let liveKnownPlayers = new Set();
+      // Follow state
+      let liveFollow2D = false;
+      let liveFollow3D = false;
+      let liveFollowCS = null;
+      // removed duplicate early follow declarations; handled later with tabs block
+      // Live 3D
+      let liveGlobeViewer = null;
+      let live3DEntities = new Map(); // callsign -> entity
+      let live3DPaths = new Map();    // callsign -> Cesium.Cartesian3[]
+      function ensureLiveGlobe(cb){
+        if (liveGlobeViewer) { cb && cb(); return; }
+        const css = document.createElement('link'); css.rel='stylesheet'; css.href='https://unpkg.com/cesium/Build/Cesium/Widgets/widgets.css'; document.head.appendChild(css);
+        const script = document.createElement('script'); window.CESIUM_BASE_URL = 'https://unpkg.com/cesium/Build/Cesium/'; script.src = window.CESIUM_BASE_URL + 'Cesium.js'; script.crossOrigin = 'anonymous';
+        script.onload = () => {
+          const C = Cesium;
+          try { if (window.CESIUM_ION_TOKEN) C.Ion.defaultAccessToken = window.CESIUM_ION_TOKEN; } catch(_) {}
+          liveGlobeViewer = new C.Viewer('liveglobe', {
+            terrainProvider: new C.EllipsoidTerrainProvider(),
+            animation:false, timeline:false, baseLayerPicker:false, geocoder:false, sceneModePicker:false,
+            infoBox:false, selectionIndicator:false, navigationHelpButton:false, fullscreenButton:false
+          });
+          liveGlobeViewer.scene.requestRenderMode = true; liveGlobeViewer.scene.maximumRenderTimeChange = Infinity;
+          cb && cb();
+        };
+        document.body.appendChild(script);
+      }
+      function updateLive3D(s){ try {
+        if (!liveGlobeViewer || typeof Cesium==='undefined') return;
+        const C = Cesium; const cs = s.callsign || 'ACFT';
+        const pos = C.Cartesian3.fromDegrees(s.lon, s.lat, (s.alt_m||0));
+        let ent = live3DEntities.get(cs);
+        if (!ent){
+          ent = liveGlobeViewer.entities.add({ position: pos, model: { uri: '/static/models/glider/Glider.glb', scale: 1.0 } });
+          live3DEntities.set(cs, ent); live3DPaths.set(cs, []);
+        } else { ent.position = pos; }
+        const h=C.Math.toRadians(s.hdg_deg||0), p=C.Math.toRadians(s.pitch_deg||0), r=C.Math.toRadians(s.roll_deg||0);
+        ent.orientation = C.Transforms.headingPitchRollQuaternion(pos, new C.HeadingPitchRoll(h,p,r));
+        const arr = live3DPaths.get(cs) || []; arr.push(pos); if (arr.length>400) arr.shift(); live3DPaths.set(cs, arr);
+        if (!ent._polyline){
+          const color = C.Color.fromHsl(((cs.length*37)%360)/360, 0.75, 0.5);
+          const posProp = new C.CallbackProperty(()=> arr.slice(), false);
+          ent._polyline = liveGlobeViewer.entities.add({ polyline: { positions: posProp, width: 2, material: color } });
+        }
+        liveGlobeViewer.scene.requestRender();
+      } catch(_) {} }
+      function follow3D(cs){ try { const ent = live3DEntities.get(cs); if (!ent) return; liveGlobeViewer.trackedEntity = ent; } catch(_) {} }
+      function home3D(cs){ try { const ent = live3DEntities.get(cs); if (!ent) return; liveGlobeViewer.trackedEntity = undefined; liveGlobeViewer.flyTo(ent, { duration: 0.8 }); } catch(_) {} }
+      function pushEvent(text){
+        if (!liveEventsEl) return;
+        const ts = new Date();
+        const line = document.createElement('div');
+        line.textContent = `[${ts.toLocaleTimeString()}] ${text}`;
+        liveEventsEl.appendChild(line);
+        // cap at ~200 lines
+        while (liveEventsEl.children.length > 200) liveEventsEl.removeChild(liveEventsEl.firstChild);
+        liveEventsEl.scrollTop = liveEventsEl.scrollHeight;
+      }
+      function ensureLiveMap(){
+        if (liveMap) return Promise.resolve();
+        return (leafletReady ? leafletReady : new Promise((resolve,reject)=>resolve())).then(()=>{
+          if (!window.L){
+            // If Leaflet not loaded yet, leverage ensureMap to load it (also sets up preview map)
+            return ensureMap().then(setupLive);
+          } else {
+            setupLive();
+            return Promise.resolve();
+          }
+        });
+      }
+      function setupLive(){
+        if (liveMap) return;
+        liveMap = L.map('livemap');
+        L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 19, attribution: '&copy; OpenStreetMap' }).addTo(liveMap);
+        liveLayer = L.layerGroup().addTo(liveMap);
+        try { liveMap.setView([20, 0], 2); } catch(_) {}
+        setTimeout(()=>liveMap.invalidateSize(), 50);
+      }
+      function markerKey(s){ return (s.callsign || 'n/a'); }
+      function makeIcon(kind, color){
+        const w=26, h=26;
+        let path='';
+        if (kind==='helicopter') { path='M13 3 L13 9 L20 11 L13 13 L13 23 L11 23 L11 13 L4 11 L11 9 L11 3 Z'; }
+        else if (kind==='glider') { path='M2 13 L24 13 L18 11 L18 9 L14 10 L13 3 L12 10 L8 9 L8 11 Z'; }
+        else { // aircraft
+          path='M13 2 L15 10 L24 12 L24 14 L15 16 L13 24 L11 16 L2 14 L2 12 L11 10 Z';
+        }
+        const svg = `<div class="ac-rot"><svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}" viewBox="0 0 26 26"><path d="${path}" fill="${color}" stroke="#111" stroke-width="0.8"/></svg></div>`;
+        return L.divIcon({ className:'ac-icon', html: svg, iconSize:[w,h], iconAnchor:[w/2,h/2] });
+      }
+      function colorForCallsign(cs){ let h=0; for(let i=0;i<cs.length;i++){ h=(h*31 + cs.charCodeAt(i))>>>0; } const hue=h%360; return `hsl(${hue},75%,50%)`; }
+      function projectMeters(lat, lon, distM, bearingDeg){ const R=6378137; const br=bearingDeg*Math.PI/180; const lat1=lat*Math.PI/180, lon1=lon*Math.PI/180; const lat2=Math.asin(Math.sin(lat1)*Math.cos(distM/R)+Math.cos(lat1)*Math.sin(distM/R)*Math.cos(br)); const lon2=lon1+Math.atan2(Math.sin(br)*Math.sin(distM/R)*Math.cos(lat1), Math.cos(distM/R)-Math.sin(lat1)*Math.sin(lat2)); return { lat: lat2*180/Math.PI, lon: ((lon2*180/Math.PI + 540)%360)-180 }; }
+      function updateMarker(s){
+        if (!liveMap || !s || typeof s.lat !== 'number' || typeof s.lon !== 'number') return;
+        const key = markerKey(s);
+        const pos = [s.lat, s.lon];
+        const altStr = (s.alt_m!=null? Math.round(s.alt_m): '?');
+        const spdStr = (s.spd_kt!=null? Math.round(s.spd_kt): '?');
+        const vsiStr = (s.vsi_ms!=null? s.vsi_ms.toFixed(1): '?');
+        const hdgStr = (s.hdg_deg!=null? Math.round(s.hdg_deg): '?');
+        const label = `${s.callsign || 'ACFT'}\nALT ${altStr} m  SPD ${spdStr} kt\nVSI ${vsiStr} m/s  HDG ${hdgStr}°`;
+        const kind = (s.aircraft||'aircraft').toLowerCase();
+        const color = colorForCallsign(key);
+        if (!liveMarkers.has(key)){
+          const m = L.marker(pos, { title: s.callsign || 'ACFT', icon: makeIcon(kind, color) }).addTo(liveLayer);
+          m.bindTooltip(label);
+          m.on('click', ()=>{ liveFollowCS = key; liveFollow2D = true; updateFollow2DBtn(); pushEvent && pushEvent(`Following ${key} (2D)`); });
+          liveMarkers.set(key, m);
+        }
+        const m = liveMarkers.get(key);
+        m.setLatLng(pos);
+        if (m.setTooltipContent) m.setTooltipContent(label);
+        try { const rot = m._icon && m._icon.querySelector('.ac-rot'); if (rot && typeof s.hdg_deg==='number') rot.style.transform = `rotate(${s.hdg_deg}deg)`; } catch(_){ }
+        // Auto-follow last-updated if enabled
+        if (liveFollow2D && (liveFollowCS===null || liveFollowCS===key)){
+          liveFollowCS = key;
+          try { liveMap.setView(pos, Math.max(8, liveMap.getZoom())); } catch(_){ }
+        }
+        // rotate icon by heading
+        try { if (m._icon && typeof s.hdg_deg==='number') m._icon.style.transform = `translate(-50%, -50%) rotate(${s.hdg_deg}deg)`; } catch(_){ }
+        // telemetry HUD (use the last updated aircraft; improves with multi-select later)
+        if (lvAlt) lvAlt.textContent = (s.alt_m!=null? Math.round(s.alt_m): '-');
+        if (lvSpd) lvSpd.textContent = (s.spd_kt!=null? Math.round(s.spd_kt): '-');
+        if (lvVsi) lvVsi.textContent = (s.vsi_ms!=null? s.vsi_ms.toFixed(1): '-');
+        if (lvHdg) lvHdg.textContent = (s.hdg_deg!=null? Math.round(s.hdg_deg): '-');
+        if (lvPitch) lvPitch.textContent = (s.pitch_deg!=null? Math.round(s.pitch_deg): '-');
+        if (lvRoll) lvRoll.textContent = (s.roll_deg!=null? Math.round(s.roll_deg): '-');
+        // Track line
+        const track = liveTracks.get(key) || [];
+        track.push({lat:s.lat, lon:s.lon, alt_m:s.alt_m||null, spd_kt:s.spd_kt||null, vsi_ms:s.vsi_ms||null, hdg_deg:s.hdg_deg||null, pitch_deg:s.pitch_deg||null, roll_deg:s.roll_deg||null, ts: (s.ts && typeof s.ts==='number')? s.ts : (Date.now()/1000)});
+        if (track.length>300) track.shift();
+        liveTracks.set(key, track);
+        let pl = liveLines.get(key);
+        const latlngs = track.map(p=>[p.lat,p.lon]);
+        if (!pl){
+          pl = L.polyline(latlngs, { color, weight:2, opacity:0.85 }).addTo(liveLayer);
+          // Hover info over track: show nearest point telemetry
+          pl.on('mousemove', (ev) => { showTrackHover(key, ev.latlng, color); });
+          pl.on('mouseout', hideTrackHover);
+          liveLines.set(key, pl);
+        }
+        else { pl.setLatLngs(latlngs); }
+        // Heading stub
+        if (typeof s.hdg_deg === 'number'){
+          const headKey = key+"/__head";
+          const len = Math.max(100, Math.min(500, (s.spd_kt||0)*2));
+          try { const dest = projectMeters(s.lat, s.lon, len, s.hdg_deg); let head = liveLines.get(headKey); const line=[pos,[dest.lat,dest.lon]]; if (!head){ head=L.polyline(line,{color:'#000',weight:3,opacity:0.25}); head.addTo(liveLayer); liveLines.set(headKey, head); } else { head.setLatLngs(line); } } catch(_) {}
+        }
+        const now = (s.ts && typeof s.ts==='number')? s.ts : (Date.now()/1000); liveLastTs.set(key, now);
+      }
+      function pruneStale(){ const now=Date.now()/1000, ttl=70; for (const [cs,ts] of Array.from(liveLastTs.entries())){ if (now-ts>ttl){ liveLastTs.delete(cs); const m=liveMarkers.get(cs); if(m){ try{liveLayer.removeLayer(m);}catch(_){ } liveMarkers.delete(cs);} const pl=liveLines.get(cs); if(pl){ try{liveLayer.removeLayer(pl);}catch(_){ } liveLines.delete(cs);} const head=liveLines.get(cs+"/__head"); if(head){ try{liveLayer.removeLayer(head);}catch(_){ } liveLines.delete(cs+"/__head"); } liveTracks.delete(cs); pushEvent && pushEvent(`Player ${cs} timed out`);} } }
+      // Track hover UI
+      let liveHoverPopup = null, liveHoverMarker = null;
+      function ensureHover(){ if (!liveHoverPopup) liveHoverPopup = L.popup({ autoPan:false, closeButton:false, className:'track-hover' }); if (!liveHoverMarker) liveHoverMarker = L.circleMarker([0,0],{radius:4,color:'#fff',weight:2,fill:true,fillColor:'#000',opacity:0}); }
+      function showTrackHover(cs, latlng, color){ try{
+        ensureHover(); if (!liveLayer.hasLayer(liveHoverMarker)) liveLayer.addLayer(liveHoverMarker);
+        const tr = liveTracks.get(cs)||[]; if (!tr.length) return;
+        // find nearest point in screen pixels (use the live map)
+        const p = liveMap.latLngToLayerPoint(latlng);
+        let bestIdx=-1, bestD2=1e12;
+        for (let i=0;i<tr.length;i++){ const ll=L.latLng(tr[i].lat, tr[i].lon); const pp=liveMap.latLngToLayerPoint(ll); const dx=pp.x-p.x, dy=pp.y-p.y; const d2=dx*dx+dy*dy; if (d2<bestD2){ bestD2=d2; bestIdx=i; } }
+        if (bestIdx<0) return;
+        const ll = L.latLng(tr[bestIdx].lat, tr[bestIdx].lon);
+        if (bestD2 > 35*35) { hideTrackHover(); return; } // only show when close (<35px)
+        liveHoverMarker.setStyle({color:'#fff', fillColor: color||'#000', opacity:1});
+        liveHoverMarker.setLatLng(ll);
+        const s = tr[bestIdx];
+        function fmt(v, d=0){ return (v==null||isNaN(v))? '-' : (d? Number(v).toFixed(d) : Math.round(Number(v))); }
+        const html = `<div style="font:12px/1.3 sans-serif;">
+          <div><b>${cs}</b></div>
+          <div>ALT ${fmt(s.alt_m)} m &nbsp; SPD ${fmt(s.spd_kt)} kt</div>
+          <div>VSI ${fmt(s.vsi_ms,1)} m/s &nbsp; HDG ${fmt(s.hdg_deg)}°</div>
+          <div>Pitch ${fmt(s.pitch_deg)}° &nbsp; Roll ${fmt(s.roll_deg)}°</div>
+        </div>`;
+        liveHoverPopup.setLatLng(ll).setContent(html);
+        if (!liveHoverPopup.isOpen()) liveHoverPopup.openOn(liveMap); else liveHoverPopup.update();
+      }catch(_){}}
+      function hideTrackHover(){ try{ if (liveHoverPopup) map.closePopup(liveHoverPopup); if (liveHoverMarker) liveHoverMarker.setStyle({opacity:0}); }catch(_){}}
+      async function fetchRecent(){
+        try {
+          const r = await fetch(`/api/live/${encodeURIComponent(liveChannel)}/recent`);
+          const j = await r.json();
+          (j.samples || []).forEach(updateMarker);
+          if ((j.samples||[]).length){
+            const lls = (j.samples||[]).map(p=>[p.lat,p.lon]);
+            try { liveMap.fitBounds(L.latLngBounds(lls).pad(0.2)); } catch(_) {}
+          }
+        } catch (e) { console.warn('recent failed', e); }
+      }
+      async function fetchHistory(){
+        try {
+          const r = await fetch(`/api/live/${encodeURIComponent(liveChannel)}/history`);
+          if (!r.ok) return;
+          const j = await r.json();
+          const tracks = (j.tracks)||{};
+          const all = [];
+          Object.entries(tracks).forEach(([cs, pts])=>{
+            pts.forEach(p=>{ const s = Object.assign({callsign:cs}, p); updateMarker(s); all.push([p.lat,p.lon]); });
+          });
+          if (all.length){ try { liveMap.fitBounds(L.latLngBounds(all).pad(0.2)); } catch(_){} }
+        } catch(_) {}
+      }
+      async function fetchInfo(){
+        try {
+          const r = await fetch(`/api/live/${encodeURIComponent(liveChannel)}/info`);
+          if (!r.ok) return;
+          const j = await r.json();
+          const c = (j.counts)||{};
+          liveMeta.textContent = `Viewers: ${c.viewers||0} • Feeders: ${c.feeders||0} • Players: ${c.players||0}`;
+          const players = (j.players||[]).map(p => p.callsign || 'ACFT');
+          livePlayersList.textContent = players.length ? `Players: ${players.join(', ')}` : 'Players: -';
+          // eventize presence changes
+          const next = new Set(players);
+          // joins
+          for (const p of next){ if (!liveKnownPlayers.has(p)) pushEvent(`Player ${p} present`); }
+          // leaves
+          for (const p of liveKnownPlayers){ if (!next.has(p)) pushEvent(`Player ${p} left`); }
+          liveKnownPlayers = next;
+        } catch(_) {}
+      }
+      function connectWs(){
+        if (liveWs) return;
+        liveChannel = (liveChInput.value||'default').trim() || 'default';
+        liveChLabel.textContent = liveChannel;
+        const params = new URLSearchParams();
+        params.set('mode', 'viewer');
+        const proto = (location.protocol==='https:') ? 'wss' : 'ws';
+        const url = `${proto}://${location.host}/ws/live/${encodeURIComponent(liveChannel)}?${params.toString()}`;
+        liveWs = new WebSocket(url);
+        liveStatus.textContent = 'connecting...';
+        liveWs.onopen = () => { liveStatus.textContent = 'connected'; pushEvent('Connected to channel'); fetchHistory().then(()=>fetchRecent()); fetchInfo(); if (liveInfoTimer) clearInterval(liveInfoTimer); liveInfoTimer = setInterval(()=>{ fetchInfo(); pruneStale(); }, 5000); };
+        liveWs.onclose = () => { liveStatus.textContent = 'disconnected'; liveWs = null; if (liveInfoTimer) { clearInterval(liveInfoTimer); liveInfoTimer=null; } };
+        liveWs.onerror = () => { liveStatus.textContent = 'error'; };
+        liveWs.onmessage = (ev) => {
+          try {
+            const msg = JSON.parse(ev.data);
+            if (msg && msg.type === 'state') { updateMarker(msg.payload); try { ensureLiveGlobe(()=>updateLive3D(msg.payload)); } catch(_) { updateLive3D(msg.payload); } }
+            if (msg && msg.type === 'event') {
+              if (msg.event === 'join' && msg.callsign) pushEvent(`Player ${msg.callsign} joined`);
+              if (msg.event === 'leave' && msg.callsign) pushEvent(`Player ${msg.callsign} left`);
+            }
+          } catch (_) {}
+        };
+      }
+      function disconnectWs(){ if (liveWs) { try { liveWs.close(); } catch(_){} liveWs = null; } }
+      liveConnectBtn.addEventListener('click', ()=>{ ensureLiveMap().then(()=>{ connectWs(); try{ liveMap.invalidateSize(); }catch(_){ } ensureLiveGlobe(); }); });
+      liveDisconnectBtn.addEventListener('click', ()=>{ disconnectWs(); });
+      liveCenterBtn.addEventListener('click', ()=>{ try { const pts = Array.from(liveMarkers.values()).map(m=>m.getLatLng()); if (pts.length) liveMap.fitBounds(L.latLngBounds(pts).pad(0.2)); } catch(_){} });
+
+      // On mount: connect to default channel automatically
+      document.addEventListener('DOMContentLoaded', ()=>{ try { if (!liveWs) { ensureLiveMap().then(()=>{ connectWs(); }); } } catch(_){} });
+
+      // Tabs for Live 2D/3D + follow
+      const liveTab2D = document.getElementById('live-tab-2d');
+      const liveTab3D = document.getElementById('live-tab-3d');
+      const btnFollow2D = document.getElementById('live_follow2d');
+      const btnFollow3D = document.getElementById('live_follow3d');
+      const btnHome3D = document.getElementById('live_home3d');
+      function updateFollow2DBtn(){ if (btnFollow2D) btnFollow2D.textContent = liveFollow2D? 'Following 2D' : 'Follow 2D'; }
+      function updateFollow3DBtn(){ if (btnFollow3D) btnFollow3D.textContent = liveFollow3D? 'Following 3D' : 'Follow 3D'; }
+      const livemap = document.getElementById('livemap');
+      const liveGlobeDiv = document.getElementById('liveglobe');
+      function release3DControls(){ try { if (!liveGlobeViewer) return; const C=Cesium; liveGlobeViewer.trackedEntity=undefined; liveGlobeViewer.camera.lookAtTransform(C.Matrix4.IDENTITY); const ctrl=liveGlobeViewer.scene.screenSpaceCameraController; ctrl.enableRotate=ctrl.enableTranslate=ctrl.enableZoom=ctrl.enableTilt=ctrl.enableLook=true; liveGlobeViewer.scene.requestRender(); } catch(_){} }
+      function follow3D(cs){ try { const ent=live3DEntities && live3DEntities.get(cs); if (!ent) return; liveGlobeViewer.trackedEntity = ent; liveGlobeViewer.scene.requestRender(); } catch(_){} }
+      function home3D(cs){ try { const ent=live3DEntities && live3DEntities.get(cs); if (!ent) return; release3DControls(); liveGlobeViewer.flyTo(ent, {duration:0.8}); } catch(_){} }
+      function setLiveTab(which){
+        const is2D = which==='2d';
+        liveTab2D && liveTab2D.classList.toggle('active', is2D);
+        liveTab3D && liveTab3D.classList.toggle('active', !is2D);
+        if (is2D){ livemap.classList.add('active'); liveGlobeDiv.classList.remove('active'); try{ liveMap.invalidateSize(); }catch(_){} }
+        else { liveGlobeDiv.classList.add('active'); livemap.classList.remove('active'); ensureLiveGlobe(()=>{ try{ liveGlobeViewer.resize(); liveGlobeViewer.scene.requestRender(); }catch(_){} }); }
+      }
+      liveTab2D && liveTab2D.addEventListener('click', ()=> setLiveTab('2d'));
+      liveTab3D && liveTab3D.addEventListener('click', ()=> setLiveTab('3d'));
+      btnFollow2D && btnFollow2D.addEventListener('click', ()=>{ liveFollow2D=!liveFollow2D; if (!liveFollowCS && liveMarkers.size) liveFollowCS = Array.from(liveMarkers.keys())[0]; updateFollow2DBtn(); pushEvent && pushEvent(liveFollow2D? `Follow 2D ${liveFollowCS||''}` : 'Follow 2D disabled'); });
+      btnFollow3D && btnFollow3D.addEventListener('click', ()=>{ ensureLiveGlobe(()=>{}); if (liveFollow3D){ liveFollow3D=false; updateFollow3DBtn(); release3DControls(); pushEvent && pushEvent('Follow 3D disabled'); } else { const cs=liveFollowCS || (liveMarkers.size? Array.from(liveMarkers.keys())[0]:null); if (cs){ liveFollow3D=true; updateFollow3DBtn(); follow3D(cs); pushEvent && pushEvent(`Follow 3D ${cs}`); } }});
+      btnHome3D && btnHome3D.addEventListener('click', ()=>{ const cs=liveFollowCS || (liveMarkers.size? Array.from(liveMarkers.keys())[0]:null); if (cs) ensureLiveGlobe(()=>home3D(cs)); });
+
+      // Preload the 2D map so the UI is usable without a GPX
+      document.addEventListener('DOMContentLoaded', () => {
+        ensureMap().then(()=> setTimeout(()=> map && map.invalidateSize(), 50));
+      });
     </script>
   </body>
   </html>

@@ -1,0 +1,5 @@
+PySide6>=6.6
+websockets>=11
+requests>=2.31
+SimConnect==0.4.26
+pyinstaller>=6.6
