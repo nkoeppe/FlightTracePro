@@ -5,6 +5,13 @@ services:
       dockerfile: Dockerfile
     container_name: navmap
     restart: unless-stopped
+    ports:
+      - "8000:8000"
+    environment:
+      - CESIUM_ION_TOKEN=${CESIUM_ION_TOKEN:-}
+      - CESIUM_ION_TOKEN_FILE=/run/secrets/cesium_ion_token
+    secrets:
+      - cesium_ion_token
     networks:
       - proxy
 
@@ -13,3 +20,6 @@ networks:
     external: true
     name: proxy
 
+secrets:
+  cesium_ion_token:
+    file: ./secrets/cesium_ion_token
