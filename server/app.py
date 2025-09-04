@@ -2780,7 +2780,7 @@ INDEX_HTML = """
 
       // Debug and home buttons for 3D
       const debugBtn = document.getElementById('live_debug3d');
-      const homeBtn = document.getElementById('live_home3d');
+      const liveHomeBtn = document.getElementById('live_home3d');
       let debugAxes = false;
       
       if (debugBtn) {
@@ -2796,8 +2796,8 @@ INDEX_HTML = """
         });
       }
       
-      if (homeBtn) {
-        homeBtn.addEventListener('click', () => {
+      if (liveHomeBtn) {
+        liveHomeBtn.addEventListener('click', () => {
           if (liveGlobeViewer) {
             liveGlobeViewer.camera.setView({
               destination: Cesium.Cartesian3.fromDegrees(0, 0, 15000000)
