@@ -7,6 +7,9 @@ on:
     paths:
       - 'client/**'
 
+permissions:
+  contents: write
+
 jobs:
   build-release:
     runs-on: windows-latest
@@ -43,23 +46,14 @@ jobs:
             --collect-data certifi ^
             client\msfs_bridge_gui.pyw --specpath client
 
-      - name: Create GitHub Release
-        id: create_release
-        uses: actions/create-release@v1
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Create GitHub Release and upload asset
+        uses: softprops/action-gh-release@v1
         with:
           tag_name: flighttracepro-v${{ env.VERSION }}-${{ github.run_number }}
-          release_name: FlightTracePro v${{ env.VERSION }} (build ${{ github.run_number }})
+          name: FlightTracePro v${{ env.VERSION }} (build ${{ github.run_number }})
           draft: false
           prerelease: false
-
-      - name: Upload Release Asset
-        uses: actions/upload-release-asset@v1
+          files: |
+            dist/FlightTracePro.exe
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          upload_url: ${{ steps.create_release.outputs.upload_url }}
-          asset_path: dist/FlightTracePro.exe
-          asset_name: FlightTracePro.exe
-          asset_content_type: application/octet-stream
