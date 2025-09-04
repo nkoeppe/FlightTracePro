@@ -307,7 +307,7 @@ class BridgeWorker(QThread):
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("NavMap Bridge (MSFS)")
+        self.setWindowTitle("FlightTracePro (MSFS Bridge)")
         self.setMinimumWidth(520)
         self.worker: Optional[BridgeWorker] = None
 
@@ -360,8 +360,14 @@ class MainWindow(QMainWindow):
         self.tray.activated.connect(self._on_tray)
         self.tray.show()
 
+        # Auto-update check (best-effort)
+        try:
+            self.check_update_async()
+        except Exception:
+            pass
+
         # Recents storage
-        self.settings = QSettings("NavMap", "Bridge")
+        self.settings = QSettings("FlightTracePro", "Bridge")
         self.load_recents()
 
     def _on_tray(self, reason):
@@ -417,13 +423,13 @@ class MainWindow(QMainWindow):
     @Slot(str)
     def on_status(self, msg: str):
         self.status.setText(msg)
-        self.tray.setToolTip(f"NavMap Bridge – {msg}")
+        self.tray.setToolTip(f"FlightTracePro – {msg}")
         self.append_log(msg)
 
     @Slot(bool)
     def on_connected(self, ok: bool):
         self.status.setText("connected" if ok else "disconnected")
-        self.tray.setToolTip(f"NavMap Bridge – {'connected' if ok else 'disconnected'}")
+        self.tray.setToolTip(f"FlightTracePro – {'connected' if ok else 'disconnected'}")
         self.append_log("connected" if ok else "disconnected")
 
     def append_log(self, msg: str):
@@ -469,6 +475,82 @@ class MainWindow(QMainWindow):
     def on_level_changed(self):
         if self.worker:
             self.worker.set_level(self.logLevel.currentText())
+
+    # --- Self-update (GitHub Releases) ---
+    def check_update_async(self):
+        import threading
+        t = threading.Thread(target=self._check_update, daemon=True)
+        t.start()
+
+    def _check_update(self):
+        import os, sys, json, tempfile, time
+        import requests
+        APP_VERSION = os.environ.get('FLIGHTTRACEPRO_APP_VERSION', '0.1.0')
+        REPO = os.environ.get('FLIGHTTRACEPRO_REPO', 'nkoeppe/FlightTracePro')  # set to 'owner/repo'
+        if REPO == 'your-user/your-repo':
+            return
+        try:
+            r = requests.get(f'https://api.github.com/repos/{REPO}/releases/latest', timeout=5)
+            if r.status_code != 200:
+                return
+            rel = r.json()
+            tag = rel.get('tag_name','')
+            ver = tag.lstrip('v').lstrip('bridge-v')
+            def parse(v):
+                parts = ''.join(c if (c.isdigit() or c=='.') else ' ' for c in v).split()
+                return tuple(int(p) for p in (parts[0].split('.') if parts else ['0']))
+            if parse(ver) <= parse(APP_VERSION):
+                return
+            # find exe asset
+            assets = rel.get('assets', [])
+            url = None
+            for a in assets:
+                n = a.get('name','')
+                if n.lower().endswith('.exe'):
+                    url = a.get('browser_download_url')
+                    break
+            if not url:
+                return
+            # Prompt
+            from PySide6.QtWidgets import QMessageBox
+            ret = QMessageBox.information(self, 'Update Available', f'New version {ver} available. Update now?', QMessageBox.Yes | QMessageBox.No)
+            if ret != QMessageBox.Yes:
+                return
+            # Download
+            tmpdir = tempfile.gettempdir()
+            newexe = os.path.join(tmpdir, 'FlightTracePro_new.exe')
+            with requests.get(url, stream=True, timeout=30) as rr:
+                rr.raise_for_status()
+                with open(newexe, 'wb') as f:
+                    for chunk in rr.iter_content(chunk_size=8192):
+                        if chunk:
+                            f.write(chunk)
+            # Only works when frozen
+            if not getattr(sys, 'frozen', False):
+                QMessageBox.information(self, 'Update', f'Downloaded new EXE to {newexe}. Please restart manually.')
+                return
+            cur = os.path.abspath(sys.executable)
+            bat = os.path.join(tmpdir, 'flighttracepro_update.bat')
+            with open(bat, 'w') as bf:
+                bf.write(f"""@echo off
+echo Updating...
+set TARGET="{cur}"
+set NEW="{newexe}"
+:loop
+copy /Y %NEW% %TARGET% >nul
+if errorlevel 1 (
+  timeout /t 1 >nul
+  goto loop
+)
+start "" %TARGET%
+del %NEW%
+del "%~f0"
+""")
+            # Spawn updater and exit
+            os.startfile(bat)
+            os._exit(0)
+        except Exception as e:
+            self.append_log(f"[update] {e}")
 
 
 def main():

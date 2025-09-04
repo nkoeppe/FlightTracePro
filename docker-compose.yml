@@ -1,9 +1,9 @@
 services:
-  navmap:
+  flighttracepro:
     build:
       context: .
       dockerfile: server/Dockerfile
-    container_name: navmap
+    container_name: flighttracepro
     restart: unless-stopped
     ports:
       - "8000:8000"

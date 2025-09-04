@@ -232,7 +232,7 @@ async def run_http_demo(server: str, channel: str, callsign: str, rate_hz: float
 
 
 def main():
-    ap = argparse.ArgumentParser(description="MSFS 2020 → NavMap live bridge")
+    ap = argparse.ArgumentParser(description="MSFS 2020 → FlightTracePro live bridge")
     ap.add_argument("--server", required=True, help="Server base URL, e.g. ws://host:8000 or http://host:8000")
     ap.add_argument("--channel", default="default", help="Channel name")
     ap.add_argument("--callsign", default="N123AB", help="Your callsign/label")

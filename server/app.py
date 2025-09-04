@@ -14,10 +14,10 @@ from uuid import uuid4
 import os
 
 
-app = FastAPI(title="NavMap – GPX→KML + Live", version="1.1.0")
+app = FastAPI(title="FlightTracePro – GPX→KML + Live", version="1.1.0")
 
 # Logger
-logger = logging.getLogger("navmap")
+logger = logging.getLogger("flighttracepro")
 if not logger.handlers:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger.setLevel(logging.INFO)
@@ -664,7 +664,7 @@ INDEX_HTML = """
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>NavMap – Professional Flight Tracking</title>
+    <title>FlightTracePro – Professional Flight Tracking</title>
     <script>window.CESIUM_ION_TOKEN='__CESIUM_ION_TOKEN__';</script>
     <script>
       // Guard for extensions expecting a geoLocationStorage global
@@ -1372,21 +1372,87 @@ INDEX_HTML = """
         transition: transform 0.3s cubic-bezier(0.4, 0, 0.2, 1);
       }
 
-      /* Aircraft Tooltip Styling */
-      .aircraft-tooltip {
-        font-family: 'SF Mono', Monaco, 'Cascadia Code', 'Roboto Mono', Consolas, 'Courier New', monospace;
-        font-size: 12px;
+      /* Aircraft Tooltip Styling - Match Telemetry Cards */
+      .aircraft-telemetry-tooltip {
         background: var(--glass-bg) !important;
         backdrop-filter: var(--glass-backdrop-filter);
         -webkit-backdrop-filter: var(--glass-backdrop-filter);
         border: 1px solid var(--glass-border) !important;
-        border-radius: var(--md-sys-shape-corner-small) !important;
+        border-radius: var(--md-sys-shape-corner-medium) !important;
         box-shadow: var(--glass-shadow) !important;
+        padding: 16px !important;
+        min-width: 280px;
         color: var(--md-sys-color-on-surface) !important;
       }
       
-      .aircraft-tooltip::before {
-        border-top-color: var(--glass-border) !important;
+      .aircraft-callsign {
+        font: var(--md-sys-typescale-title-medium);
+        font-weight: 700;
+        color: var(--md-sys-color-primary);
+        margin-bottom: 12px;
+        text-align: center;
+      }
+      
+      .telemetry-grid {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 8px;
+        margin-bottom: 12px;
+      }
+      
+      .telem-tile {
+        background: rgba(var(--md-sys-color-surface-variant-rgb), 0.3);
+        border-radius: var(--md-sys-shape-corner-small);
+        padding: 8px;
+        text-align: center;
+        border: 1px solid var(--md-sys-color-outline-variant);
+      }
+      
+      .telem-label {
+        font: var(--md-sys-typescale-label-small);
+        color: var(--md-sys-color-on-surface);
+        text-transform: uppercase;
+        letter-spacing: 0.5px;
+        margin-bottom: 2px;
+        font-weight: 500;
+        opacity: 1;
+      }
+      
+      .telem-value {
+        font: var(--md-sys-typescale-title-small);
+        font-family: 'SF Mono', Monaco, 'Cascadia Code', 'Roboto Mono', Consolas, 'Courier New', monospace;
+        font-weight: 700;
+        color: var(--md-sys-color-on-surface);
+        display: flex;
+        align-items: baseline;
+        justify-content: center;
+        gap: 2px;
+      }
+      
+      .telem-unit {
+        font: var(--md-sys-typescale-label-small);
+        color: var(--md-sys-color-on-surface);
+        opacity: 0.9;
+        font-weight: 500;
+      }
+      
+      .tooltip-hint {
+        font: var(--md-sys-typescale-body-small);
+        color: var(--md-sys-color-on-surface-variant);
+        text-align: center;
+        padding-top: 8px;
+        border-top: 1px solid var(--md-sys-color-outline-variant);
+        opacity: 0.8;
+      }
+      
+      .leaflet-tooltip.aircraft-tooltip {
+        background: transparent !important;
+        border: none !important;
+        box-shadow: none !important;
+      }
+      
+      .leaflet-tooltip.aircraft-tooltip::before {
+        display: none !important;
       }
 
       /* Interactive Elements */
@@ -1580,7 +1646,7 @@ INDEX_HTML = """
   </head>
   <body>
     <header>
-      <h1>NavMap</h1>
+      <h1>FlightTracePro</h1>
       <div class="topnav">
         <button id="nav-live" class="active">Live Map</button>
         <button id="nav-conv">Converter</button>
@@ -1779,7 +1845,10 @@ INDEX_HTML = """
           <div style="display:flex; gap:16px; align-items:flex-end; flex-wrap:wrap; margin: 24px 0;">
             <div>
               <label class="lbl" for="live_channel">Channel</label>
-              <input id="live_channel" value="default" />
+              <div style="display:flex; gap:8px;">
+                <input id="live_channel" value="default" />
+                <button id="channel_manage_btn" class="btn" type="button" style="padding:8px 12px;">⚙️</button>
+              </div>
             </div>
             <div>
               <label class="lbl" for="live_callsign">Callsign</label>
@@ -1840,8 +1909,50 @@ INDEX_HTML = """
       </div>
 
       <footer>
-        Powered by FastAPI, GPXPy, and SimplekML • Modern UI with Material Design 3
       </footer>
+    </div>
+
+    <!-- Channel Management Dialog -->
+    <div id="channel_dialog" class="modal" style="display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.5); z-index: 2000; backdrop-filter: blur(4px);">
+      <div class="modal-content" style="max-width: 500px; margin: 10vh auto; padding: 32px; background: var(--md-sys-color-surface-container); border-radius: 28px; border: 1px solid var(--md-sys-color-outline-variant); box-shadow: 0 24px 32px rgba(0,0,0,0.3);">
+        <h2 style="margin: 0 0 24px 0; color: var(--md-sys-color-on-surface);">Channel Management</h2>
+        
+        <div style="margin-bottom: 24px;">
+          <h3 style="margin: 0 0 12px 0; font-size: 16px; font-weight: 500;">Recent Channels</h3>
+          <div id="recent_channels" style="display: flex; flex-direction: column; gap: 8px; max-height: 150px; overflow-y: auto;">
+            <!-- Recent channels will be populated here -->
+          </div>
+        </div>
+        
+        <div style="margin-bottom: 24px;">
+          <h3 style="margin: 0 0 12px 0; font-size: 16px; font-weight: 500;">Create New Channel</h3>
+          <div style="display: flex; flex-direction: column; gap: 12px;">
+            <div>
+              <label class="lbl" for="new_channel_name">Channel Name</label>
+              <input id="new_channel_name" placeholder="Enter unique channel name" />
+            </div>
+            <div>
+              <label class="lbl" for="new_channel_key">Post Key (optional)</label>
+              <input id="new_channel_key" type="password" placeholder="Leave empty for public channel" />
+            </div>
+            <button id="create_channel_btn" class="btn primary" type="button">Create Channel</button>
+          </div>
+        </div>
+        
+        <div style="margin-bottom: 24px; padding: 16px; background: var(--md-sys-color-surface-variant); border-radius: 16px;">
+          <h3 style="margin: 0 0 8px 0; font-size: 14px; font-weight: 500; color: var(--md-sys-color-on-surface-variant);">💡 Channel Tips</h3>
+          <ul style="margin: 0; padding-left: 16px; font-size: 13px; color: var(--md-sys-color-on-surface-variant);">
+            <li>Channels are created automatically when first used</li>
+            <li>Post keys are required for flight data uploads only</li>
+            <li>Viewers can join any channel without keys</li>
+            <li>Use descriptive names like "event-name-2024" or "training-session-1"</li>
+          </ul>
+        </div>
+        
+        <div style="display: flex; gap: 12px; justify-content: flex-end;">
+          <button id="channel_dialog_close" class="btn" type="button">Close</button>
+        </div>
+      </div>
     </div>
 
     <script>
@@ -1874,12 +1985,12 @@ INDEX_HTML = """
       function saveSettings() {
         PERSIST_KEYS.forEach(k => {
           const el = document.getElementById(k);
-          if (el) localStorage.setItem('navmap_'+k, el.value);
+          if (el) localStorage.setItem('ftpro_'+k, el.value);
         });
       }
       function loadSettings() {
         PERSIST_KEYS.forEach(k => {
-          const v = localStorage.getItem('navmap_'+k);
+          const v = localStorage.getItem('ftpro_'+k);
           if (v !== null) {
             const el = document.getElementById(k);
             if (el) el.value = v;
@@ -2068,6 +2179,7 @@ INDEX_HTML = """
       let liveMap = null, liveLeafletReady = null;
       let liveMarkers = new Map(); // callsign -> marker
       let livePaths = new Map();   // callsign -> L.polyline
+      let liveTrackData = new Map(); // callsign -> array of {pos, data, timestamp}
       
       function ensureLiveMap() {
         if (liveMap) return Promise.resolve();
@@ -2326,6 +2438,88 @@ INDEX_HTML = """
       // Enhanced live connection management
       let liveWs = null, liveConnected = false;
       
+      // Professional color palette for aircraft tracking
+      const AIRCRAFT_COLORS = [
+        '#2E8B57', // Sea Green
+        '#4682B4', // Steel Blue
+        '#CD853F', // Peru
+        '#8B008B', // Dark Magenta
+        '#FF6347', // Tomato
+        '#4169E1', // Royal Blue
+        '#32CD32', // Lime Green
+        '#FF4500', // Orange Red
+        '#9370DB', // Medium Purple
+        '#20B2AA', // Light Sea Green
+        '#DC143C', // Crimson
+        '#00CED1', // Dark Turquoise
+        '#FF1493', // Deep Pink
+        '#1E90FF', // Dodger Blue
+        '#FFD700', // Gold
+        '#8A2BE2', // Blue Violet
+        '#00FA9A', // Medium Spring Green
+        '#FF69B4', // Hot Pink
+        '#5F9EA0', // Cadet Blue
+        '#D2691E'  // Chocolate
+      ];
+      
+      // Callsign to color mapping with persistence
+      const callsignColors = new Map();
+      
+      // Load persisted color mappings on startup
+      function loadCallsignColors() {
+        try {
+          const stored = localStorage.getItem('ftpro_callsign_colors');
+          if (stored) {
+            const parsed = JSON.parse(stored);
+            Object.entries(parsed).forEach(([callsign, color]) => {
+              callsignColors.set(callsign, color);
+            });
+          }
+        } catch (e) {
+          console.warn('Failed to load callsign colors:', e);
+        }
+      }
+      
+      // Save color mappings to localStorage
+      function saveCallsignColors() {
+        try {
+          const colorMap = {};
+          callsignColors.forEach((color, callsign) => {
+            colorMap[callsign] = color;
+          });
+          localStorage.setItem('ftpro_callsign_colors', JSON.stringify(colorMap));
+        } catch (e) {
+          console.warn('Failed to save callsign colors:', e);
+        }
+      }
+      
+      // Generate deterministic color for callsign
+      function getCallsignColor(callsign) {
+        if (callsignColors.has(callsign)) {
+          return callsignColors.get(callsign);
+        }
+        
+        // Simple hash function for deterministic color selection
+        let hash = 0;
+        for (let i = 0; i < callsign.length; i++) {
+          const char = callsign.charCodeAt(i);
+          hash = ((hash << 5) - hash) + char;
+          hash = hash & hash; // Convert to 32-bit integer
+        }
+        
+        // Select color from palette based on hash
+        const colorIndex = Math.abs(hash) % AIRCRAFT_COLORS.length;
+        const color = AIRCRAFT_COLORS[colorIndex];
+        
+        // Store mapping for consistency
+        callsignColors.set(callsign, color);
+        
+        // Persist to localStorage
+        saveCallsignColors();
+        
+        return color;
+      }
+      
       function pushEvent(msg) {
         if (liveEventsEl) {
           const div = document.createElement('div');
@@ -2336,11 +2530,22 @@ INDEX_HTML = """
       }
 
       // WebSocket connection handling
+      let currentChannel = null;
       function connectWs() {
         if (liveWs) return;
         
         const channel = (liveChInput.value || 'default').trim();
         liveChLabel.textContent = channel;
+        
+        // Clear map if switching to a different channel
+        if (currentChannel && currentChannel !== channel) {
+          clearMapData();
+          pushEvent(`Switched from channel '${currentChannel}' to '${channel}'`);
+        } else if (!currentChannel) {
+          // First connection - clear any stale data
+          clearMapData();
+        }
+        currentChannel = channel;
         
         const proto = location.protocol === 'https:' ? 'wss' : 'ws';
         const url = `${proto}://${location.host}/ws/live/${encodeURIComponent(channel)}?mode=viewer`;
@@ -2353,15 +2558,20 @@ INDEX_HTML = """
           liveStatus.textContent = 'connected';
           pushEvent('Connected to live channel');
           
-          // Fetch initial data
+          // Load persisted track data first
+          loadTrackData(channel);
+          
+          // Fetch initial data and history
           fetchRecent();
           fetchInfo();
+          fetchHistory(channel);
           
-          // Start periodic info updates
+          // Start periodic info updates and track saving
           if (liveInfoTimer) clearInterval(liveInfoTimer);
           liveInfoTimer = setInterval(() => {
             fetchInfo();
             pruneStale();
+            saveTrackData(channel);  // Save tracks every 3 seconds
           }, 3000);
         };
         
@@ -2369,11 +2579,15 @@ INDEX_HTML = """
           liveConnected = false;
           liveStatus.textContent = 'disconnected';
           liveWs = null;
+          currentChannel = null;  // Reset current channel on unexpected disconnect
           
           if (liveInfoTimer) {
             clearInterval(liveInfoTimer);
             liveInfoTimer = null;
           }
+          
+          // Save track data before closing
+          saveTrackData(channel);
           
           pushEvent('Disconnected from live channel');
         };
@@ -2396,12 +2610,86 @@ INDEX_HTML = """
         };
       }
       
+      // Clear all map data (aircraft, tracks, UI)
+      function clearMapData() {
+        // Clear 2D map data
+        if (liveMap) {
+          liveMarkers.forEach(marker => liveMap.removeLayer(marker));
+          livePaths.forEach(path => liveMap.removeLayer(path));
+        }
+        
+        // Clear 3D globe data
+        if (liveGlobeViewer) {
+          liveGlobeViewer.entities.removeAll();
+        }
+        
+        // Clear data structures
+        liveMarkers.clear();
+        livePaths.clear();
+        liveTrackData.clear();
+        
+        // Clear telemetry display
+        const telemetryElements = ['lv_alt', 'lv_spd', 'lv_vsi', 'lv_hdg', 'lv_pitch', 'lv_roll'];
+        telemetryElements.forEach(id => {
+          const el = document.getElementById(id);
+          if (el) el.textContent = '-';
+        });
+        
+        // Clear player chips
+        if (livePlayersChips) {
+          livePlayersChips.innerHTML = '';
+        }
+        
+        // Reset follow state
+        liveFollow2D = false;
+        liveFollow3D = false;
+        liveFollowCS = null;
+        updateFollowBtn();
+        
+        pushEvent('Map cleared');
+      }
+
       function disconnectWs() {
         if (liveWs) {
+          // Save track data before disconnecting
+          const channel = (liveChInput.value || 'default').trim();
+          saveTrackData(channel);
+          
           liveWs.close();
           liveWs = null;
         }
         liveConnected = false;
+        currentChannel = null;  // Reset current channel
+        
+        // Clear all map data when disconnecting
+        clearMapData();
+      }
+
+      // Track data persistence functions
+      function saveTrackData(channel) {
+        try {
+          const trackDataObj = {};
+          liveTrackData.forEach((data, callsign) => {
+            trackDataObj[callsign] = data;
+          });
+          localStorage.setItem(`ftpro_tracks_${channel}`, JSON.stringify(trackDataObj));
+        } catch (e) {
+          console.error('Failed to save track data:', e);
+        }
+      }
+
+      function loadTrackData(channel) {
+        try {
+          const saved = localStorage.getItem(`ftpro_tracks_${channel}`);
+          if (saved) {
+            const trackDataObj = JSON.parse(saved);
+            Object.entries(trackDataObj).forEach(([callsign, data]) => {
+              liveTrackData.set(callsign, data);
+            });
+          }
+        } catch (e) {
+          console.error('Failed to load track data:', e);
+        }
       }
 
       // Fetch functions
@@ -2413,6 +2701,123 @@ INDEX_HTML = """
           data.samples.forEach(sample => updateLivePosition(sample));
         } catch (e) {
           console.error('Failed to fetch recent:', e);
+        }
+      }
+
+      async function fetchHistory() {
+        try {
+          const channel = liveChInput.value || 'default';
+          const resp = await fetch(`/api/live/${encodeURIComponent(channel)}/history`);
+          const data = await resp.json();
+          
+          // Process historical tracks
+          Object.entries(data.tracks || {}).forEach(([callsign, trackPoints]) => {
+            if (trackPoints && trackPoints.length > 0) {
+              // Convert server history to our format
+              const formattedTrack = trackPoints.map(point => ({
+                pos: [point.lat, point.lon],
+                data: point,
+                timestamp: point.ts ? point.ts * 1000 : Date.now() // Convert to milliseconds
+              }));
+              
+              // Merge with existing track data
+              const existing = liveTrackData.get(callsign) || [];
+              const combined = [...existing, ...formattedTrack];
+              
+              // Remove duplicates and sort by timestamp
+              const unique = combined.filter((point, index, arr) => 
+                index === 0 || arr[index - 1].timestamp !== point.timestamp
+              ).sort((a, b) => a.timestamp - b.timestamp);
+              
+              // Keep only last 500 points
+              if (unique.length > 500) {
+                unique.splice(0, unique.length - 500);
+              }
+              
+              liveTrackData.set(callsign, unique);
+              
+              // Create/update track visualization
+              if (liveMap && unique.length > 1) {
+                const positions = unique.map(p => p.pos);
+                const color = getCallsignColor(callsign);
+                
+                if (!livePaths.has(callsign)) {
+                  const pathLine = L.polyline(positions, { 
+                    color: color, 
+                    weight: 3, 
+                    opacity: 0.7 
+                  }).addTo(liveMap);
+                  
+                  // Add hover functionality to historical track
+                  pathLine.on('mouseover', function(e) {
+                    this.setStyle({ weight: 5, opacity: 1 });
+                    
+                    // Find closest track point
+                    let closestPoint = unique[0];
+                    let minDistance = Infinity;
+                    
+                    unique.forEach(point => {
+                      const distance = liveMap.distance(e.latlng, point.pos);
+                      if (distance < minDistance) {
+                        minDistance = distance;
+                        closestPoint = point;
+                      }
+                    });
+                    
+                    const trackTooltipContent = `
+                      <div class="aircraft-telemetry-tooltip">
+                        <div class="aircraft-callsign">${callsign} - Historical Track</div>
+                        <div class="telemetry-grid">
+                          <div class="telem-tile">
+                            <div class="telem-label">ALT</div>
+                            <div class="telem-value">${closestPoint.data.alt_m ? Math.round(closestPoint.data.alt_m) : '-'}<span class="telem-unit">m</span></div>
+                          </div>
+                          <div class="telem-tile">
+                            <div class="telem-label">SPD</div>
+                            <div class="telem-value">${closestPoint.data.spd_kt ? Math.round(closestPoint.data.spd_kt) : '-'}<span class="telem-unit">kt</span></div>
+                          </div>
+                          <div class="telem-tile">
+                            <div class="telem-label">HDG</div>
+                            <div class="telem-value">${closestPoint.data.hdg_deg ? Math.round(closestPoint.data.hdg_deg) : '-'}<span class="telem-unit">°</span></div>
+                          </div>
+                          <div class="telem-tile">
+                            <div class="telem-label">V/S</div>
+                            <div class="telem-value">${closestPoint.data.vsi_ms ? closestPoint.data.vsi_ms.toFixed(1) : '-'}<span class="telem-unit">m/s</span></div>
+                          </div>
+                        </div>
+                        <div class="tooltip-hint">Historical - ${new Date(closestPoint.timestamp).toLocaleTimeString()}</div>
+                      </div>
+                    `;
+                    
+                    this.bindTooltip(trackTooltipContent, {
+                      maxWidth: 320,
+                      className: 'aircraft-tooltip',
+                      direction: 'top',
+                      offset: [0, -10],
+                      sticky: true
+                    }).openTooltip(e.latlng);
+                  });
+                  
+                  pathLine.on('mouseout', function(e) {
+                    this.setStyle({ weight: 3, opacity: 0.7 });
+                    this.closeTooltip();
+                  });
+                  
+                  livePaths.set(callsign, pathLine);
+                } else {
+                  // Update existing path
+                  const pathLine = livePaths.get(callsign);
+                  if (pathLine) {
+                    pathLine.setLatLngs(positions);
+                  }
+                }
+              }
+            }
+          });
+          
+          pushEvent(`Loaded historical tracks for ${Object.keys(data.tracks || {}).length} aircraft`);
+        } catch (e) {
+          console.error('Failed to fetch history:', e);
         }
       }
       
@@ -2493,30 +2898,52 @@ INDEX_HTML = """
         if (lvPitch) lvPitch.textContent = sample.pitch_deg ? Math.round(sample.pitch_deg) : '-';
         if (lvRoll) lvRoll.textContent = sample.roll_deg ? Math.round(sample.roll_deg) : '-';
         
-        // Create enhanced aircraft icon
-        const color = '#ff4444'; // Red trail color
+        // Create enhanced aircraft icon with callsign-specific color
+        const color = getCallsignColor(cs);
         const icon = L.divIcon({
           className: 'ac-icon',
-          html: `<div class="ac-rot" style="transform: rotate(${sample.hdg_deg || 0}deg); background: rgba(255,255,255,0.9); border: 2px solid #1a73e8; border-radius: 50%; padding: 4px; box-shadow: 0 2px 8px rgba(0,0,0,0.3);">
-            <div style="width: 32px; height: 32px; background: #1a73e8; mask: url('/static/icons/airplane.svg') no-repeat center; -webkit-mask: url('/static/icons/airplane.svg') no-repeat center; mask-size: 24px 24px; -webkit-mask-size: 24px 24px;"></div>
+          html: `<div class="ac-rot" style="transform: rotate(${sample.hdg_deg || 0}deg); background: rgba(255,255,255,0.9); border: 2px solid ${color}; border-radius: 50%; padding: 4px; box-shadow: 0 2px 8px rgba(0,0,0,0.3);">
+            <div style="width: 32px; height: 32px; background: ${color}; mask: url('/static/icons/airplane.svg') no-repeat center; -webkit-mask: url('/static/icons/airplane.svg') no-repeat center; mask-size: 24px 24px; -webkit-mask-size: 24px 24px;"></div>
           </div>`,
           iconSize: [40, 40],
           iconAnchor: [20, 20]
         });
         
-        // Create detailed tooltip content
+        // Create telemetry-style tooltip content
         const tooltipContent = `
-          <div style="font-family: 'SF Mono', monospace; line-height: 1.4;">
-            <div style="font-weight: bold; margin-bottom: 4px; color: #1a73e8;">${cs}</div>
-            <div><strong>Alt:</strong> ${sample.alt_m ? Math.round(sample.alt_m) + 'm' : 'N/A'}</div>
-            <div><strong>Speed:</strong> ${sample.spd_kt ? Math.round(sample.spd_kt) + ' kt' : 'N/A'}</div>
-            <div><strong>Heading:</strong> ${sample.hdg_deg ? Math.round(sample.hdg_deg) + '°' : 'N/A'}</div>
-            <div><strong>V/S:</strong> ${sample.vsi_ms ? sample.vsi_ms.toFixed(1) + ' m/s' : 'N/A'}</div>
-            ${sample.pitch_deg !== undefined ? `<div><strong>Pitch:</strong> ${Math.round(sample.pitch_deg)}°</div>` : ''}
-            ${sample.roll_deg !== undefined ? `<div><strong>Roll:</strong> ${Math.round(sample.roll_deg)}°</div>` : ''}
-            <div style="margin-top: 6px; font-size: 11px; color: #666; border-top: 1px solid #eee; padding-top: 4px;">
-              Click to follow this aircraft
+          <div class="aircraft-telemetry-tooltip">
+            <div class="aircraft-callsign">${cs}</div>
+            <div class="telemetry-grid">
+              <div class="telem-tile">
+                <div class="telem-label">ALT</div>
+                <div class="telem-value">${sample.alt_m ? Math.round(sample.alt_m) : '-'}<span class="telem-unit">m</span></div>
+              </div>
+              <div class="telem-tile">
+                <div class="telem-label">SPD</div>
+                <div class="telem-value">${sample.spd_kt ? Math.round(sample.spd_kt) : '-'}<span class="telem-unit">kt</span></div>
+              </div>
+              <div class="telem-tile">
+                <div class="telem-label">HDG</div>
+                <div class="telem-value">${sample.hdg_deg ? Math.round(sample.hdg_deg) : '-'}<span class="telem-unit">°</span></div>
+              </div>
+              <div class="telem-tile">
+                <div class="telem-label">V/S</div>
+                <div class="telem-value">${sample.vsi_ms ? sample.vsi_ms.toFixed(1) : '-'}<span class="telem-unit">m/s</span></div>
+              </div>
+              ${sample.pitch_deg !== undefined ? `
+                <div class="telem-tile">
+                  <div class="telem-label">PITCH</div>
+                  <div class="telem-value">${Math.round(sample.pitch_deg)}<span class="telem-unit">°</span></div>
+                </div>
+              ` : ''}
+              ${sample.roll_deg !== undefined ? `
+                <div class="telem-tile">
+                  <div class="telem-label">ROLL</div>
+                  <div class="telem-value">${Math.round(sample.roll_deg)}<span class="telem-unit">°</span></div>
+                </div>
+              ` : ''}
             </div>
+            <div class="tooltip-hint">Click to follow</div>
           </div>
         `;
 
@@ -2524,8 +2951,10 @@ INDEX_HTML = """
         if (!liveMarkers.has(cs)) {
           const marker = L.marker(pos, { icon: icon }).addTo(liveMap);
           marker.bindTooltip(tooltipContent, { 
-            maxWidth: 250,
-            className: 'aircraft-tooltip'
+            maxWidth: 320,
+            className: 'aircraft-tooltip',
+            direction: 'top',
+            offset: [0, -20]
           });
           
           // Add click handler for following
@@ -2538,20 +2967,80 @@ INDEX_HTML = """
           
           liveMarkers.set(cs, marker);
           
-          // Create flight path
+          // Create flight path with hover functionality
           const pathLine = L.polyline([pos], { 
             color: color, 
             weight: 3, 
             opacity: 0.7 
           }).addTo(liveMap);
           
+          // Initialize track data for this aircraft
+          liveTrackData.set(cs, [{
+            pos: pos,
+            data: { ...sample },
+            timestamp: Date.now()
+          }]);
+          
           // Add hover and click interactions
           pathLine.on('mouseover', function(e) {
             this.setStyle({ weight: 5, opacity: 1 });
+            
+            // Find closest track point to hover position
+            const trackData = liveTrackData.get(cs) || [];
+            if (trackData.length > 0) {
+              let closestPoint = trackData[0];
+              let minDistance = Infinity;
+              
+              trackData.forEach(point => {
+                const distance = liveMap.distance(e.latlng, point.pos);
+                if (distance < minDistance) {
+                  minDistance = distance;
+                  closestPoint = point;
+                }
+              });
+              
+              // Create track point tooltip
+              const trackTooltipContent = `
+                <div class="aircraft-telemetry-tooltip">
+                  <div class="aircraft-callsign">${cs} - Track Point</div>
+                  <div class="telemetry-grid">
+                    <div class="telem-tile">
+                      <div class="telem-label">ALT</div>
+                      <div class="telem-value">${closestPoint.data.alt_m ? Math.round(closestPoint.data.alt_m) : '-'}<span class="telem-unit">m</span></div>
+                    </div>
+                    <div class="telem-tile">
+                      <div class="telem-label">SPD</div>
+                      <div class="telem-value">${closestPoint.data.spd_kt ? Math.round(closestPoint.data.spd_kt) : '-'}<span class="telem-unit">kt</span></div>
+                    </div>
+                    <div class="telem-tile">
+                      <div class="telem-label">HDG</div>
+                      <div class="telem-value">${closestPoint.data.hdg_deg ? Math.round(closestPoint.data.hdg_deg) : '-'}<span class="telem-unit">°</span></div>
+                    </div>
+                    <div class="telem-tile">
+                      <div class="telem-label">V/S</div>
+                      <div class="telem-value">${closestPoint.data.vsi_ms ? closestPoint.data.vsi_ms.toFixed(1) : '-'}<span class="telem-unit">m/s</span></div>
+                    </div>
+                  </div>
+                  <div class="tooltip-hint">Time: ${new Date(closestPoint.timestamp).toLocaleTimeString()}</div>
+                </div>
+              `;
+              
+              // Show tooltip at hover position
+              this.bindTooltip(trackTooltipContent, {
+                maxWidth: 320,
+                className: 'aircraft-tooltip',
+                direction: 'top',
+                offset: [0, -10],
+                sticky: true
+              }).openTooltip(e.latlng);
+            }
           });
+          
           pathLine.on('mouseout', function(e) {
             this.setStyle({ weight: 3, opacity: 0.7 });
+            this.closeTooltip();
           });
+          
           pathLine.on('click', function(e) {
             liveFollowCS = cs;
             liveFollow2D = true;
@@ -2568,14 +3057,21 @@ INDEX_HTML = """
           marker.setIcon(icon);
           marker.setTooltipContent(tooltipContent);
           
-          // Update flight path
+          // Update flight path and track data
           const pathLine = livePaths.get(cs);
+          const trackData = liveTrackData.get(cs) || [];
+          
           if (pathLine) {
             const currentPath = pathLine.getLatLngs();
             
             // Reset path if break_path flag is set or if large jump detected
             if (sample.break_path) {
               pathLine.setLatLngs([pos]);
+              liveTrackData.set(cs, [{
+                pos: pos,
+                data: { ...sample },
+                timestamp: Date.now()
+              }]);
             } else {
               // Check for large jumps (teleportation)
               if (currentPath.length > 0) {
@@ -2583,14 +3079,35 @@ INDEX_HTML = """
                 const distance = liveMap.distance(lastPos, pos);
                 if (distance > 20000) { // 20km jump
                   pathLine.setLatLngs([pos]);
+                  liveTrackData.set(cs, [{
+                    pos: pos,
+                    data: { ...sample },
+                    timestamp: Date.now()
+                  }]);
                 } else {
+                  // Add new point to path and track data
                   currentPath.push(pos);
-                  // Keep only last 500 points
+                  trackData.push({
+                    pos: pos,
+                    data: { ...sample },
+                    timestamp: Date.now()
+                  });
+                  
+                  // Keep only last 500 points for performance
                   if (currentPath.length > 500) currentPath.shift();
+                  if (trackData.length > 500) trackData.shift();
+                  
                   pathLine.setLatLngs(currentPath);
+                  liveTrackData.set(cs, trackData);
                 }
               } else {
                 pathLine.setLatLngs([pos]);
+                trackData.push({
+                  pos: pos,
+                  data: { ...sample },
+                  timestamp: Date.now()
+                });
+                liveTrackData.set(cs, trackData);
               }
             }
           }
@@ -2653,7 +3170,7 @@ INDEX_HTML = """
             polyline: {
               positions: [pos], // Start with current position
               width: 4,
-              material: C.Color.fromCssColorString('#ff4444').withAlpha(0.8),
+              material: C.Color.fromCssColorString(getCallsignColor(cs)).withAlpha(0.8),
               clampToGround: false,
               followSurface: false
             }
@@ -2806,8 +3323,153 @@ INDEX_HTML = """
         });
       }
 
+      // Save track data before page unload
+      window.addEventListener('beforeunload', () => {
+        if (liveConnected) {
+          const channel = (liveChInput.value || 'default').trim();
+          saveTrackData(channel);
+        }
+      });
+
+      // Channel Management System
+      const channelDialog = document.getElementById('channel_dialog');
+      const channelManageBtn = document.getElementById('channel_manage_btn');
+      const channelDialogClose = document.getElementById('channel_dialog_close');
+      const createChannelBtn = document.getElementById('create_channel_btn');
+      const newChannelName = document.getElementById('new_channel_name');
+      const newChannelKey = document.getElementById('new_channel_key');
+      const recentChannelsEl = document.getElementById('recent_channels');
+      
+      // Load and save recent channels
+      function loadRecentChannels() {
+        try {
+          const recent = JSON.parse(localStorage.getItem('ftpro_recent_channels') || '[]');
+          return recent.slice(0, 10); // Keep only last 10
+        } catch (e) {
+          return [];
+        }
+      }
+      
+      function saveRecentChannel(channelName, key = '') {
+        const recent = loadRecentChannels();
+        const existing = recent.findIndex(c => c.name === channelName);
+        
+        if (existing >= 0) {
+          // Move to top and update key
+          recent.splice(existing, 1);
+        }
+        
+        recent.unshift({ name: channelName, key: key, lastUsed: Date.now() });
+        localStorage.setItem('ftpro_recent_channels', JSON.stringify(recent.slice(0, 10)));
+        updateRecentChannelsUI();
+      }
+      
+      function updateRecentChannelsUI() {
+        const recent = loadRecentChannels();
+        recentChannelsEl.innerHTML = '';
+        
+        if (recent.length === 0) {
+          recentChannelsEl.innerHTML = '<div style="color: var(--md-sys-color-on-surface-variant); font-style: italic;">No recent channels</div>';
+          return;
+        }
+        
+        recent.forEach(channel => {
+          const btn = document.createElement('button');
+          btn.className = 'btn';
+          btn.style.cssText = 'width: 100%; text-align: left; display: flex; justify-content: space-between; align-items: center;';
+          btn.innerHTML = `
+            <span>${channel.name}</span>
+            <span style="font-size: 12px; color: var(--md-sys-color-on-surface-variant);">${channel.key ? '🔒' : '🌐'}</span>
+          `;
+          btn.addEventListener('click', () => {
+            const oldChannel = liveChInput.value;
+            liveChInput.value = channel.name;
+            if (channel.key) {
+              liveKey.value = channel.key;
+            }
+            channelDialog.style.display = 'none';
+            
+            // Reconnect if switching to a different channel while connected
+            if (liveConnected && oldChannel !== channel.name) {
+              disconnectWs();
+              setTimeout(() => connectWs(), 100); // Brief delay for clean reconnection
+            }
+          });
+          recentChannelsEl.appendChild(btn);
+        });
+      }
+      
+      // Event listeners for channel management
+      channelManageBtn.addEventListener('click', () => {
+        updateRecentChannelsUI();
+        channelDialog.style.display = 'block';
+      });
+      
+      channelDialogClose.addEventListener('click', () => {
+        channelDialog.style.display = 'none';
+      });
+      
+      // Close dialog on outside click
+      channelDialog.addEventListener('click', (e) => {
+        if (e.target === channelDialog) {
+          channelDialog.style.display = 'none';
+        }
+      });
+      
+      createChannelBtn.addEventListener('click', () => {
+        const name = newChannelName.value.trim();
+        const key = newChannelKey.value.trim();
+        
+        if (!name) {
+          alert('Please enter a channel name');
+          return;
+        }
+        
+        if (!/^[a-zA-Z0-9_-]+$/.test(name)) {
+          alert('Channel name can only contain letters, numbers, underscores and dashes');
+          return;
+        }
+        
+        // Set the channel
+        const oldChannel = liveChInput.value;
+        liveChInput.value = name;
+        if (key) {
+          liveKey.value = key;
+        }
+        
+        // Save to recent channels
+        saveRecentChannel(name, key);
+        
+        // Clear form
+        newChannelName.value = '';
+        newChannelKey.value = '';
+        
+        // Close dialog
+        channelDialog.style.display = 'none';
+        
+        pushEvent(`Created/switched to channel: ${name}`);
+        
+        // Reconnect if switching to a different channel while connected
+        if (liveConnected && oldChannel !== name) {
+          disconnectWs();
+          setTimeout(() => connectWs(), 100); // Brief delay for clean reconnection
+        }
+      });
+      
+      // Save current channel when connecting
+      const originalConnectWs = connectWs;
+      connectWs = function() {
+        const channel = (liveChInput.value || 'default').trim();
+        const key = (liveKey.value || '').trim();
+        saveRecentChannel(channel, key);
+        return originalConnectWs();
+      };
+
       // Auto-connect on page load
       document.addEventListener('DOMContentLoaded', () => {
+        // Load persisted callsign colors
+        loadCallsignColors();
+        
         setTimeout(() => {
           if (!liveConnected && liveChInput.value !== '') {
             ensureLiveMap().then(() => connectWs());

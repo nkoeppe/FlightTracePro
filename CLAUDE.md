@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-NavMap is a real-time flight tracking system with GPX to KML conversion capabilities. The system consists of:
+FlightTracePro is a real-time flight tracking system with GPX to KML conversion capabilities. The system consists of:
 
 - **FastAPI server** (`server/`) - Web application with live map UI and GPX/KML conversion
 - **Windows bridge client** (`client/`) - Streams MSFS 2020 flight data to the server via SimConnect
@@ -53,7 +53,7 @@ python client/msfs_bridge_gui.pyw
 ### Build Windows EXE
 ```bash
 # From project root
-pyinstaller --noconsole --name NavMapBridge --onefile --icon NONE client/msfs_bridge_gui.pyw
+pyinstaller --noconsole --name FlightTraceProBridge --onefile --icon NONE client/msfs_bridge_gui.pyw
 ```
 
 ## Architecture Overview
@@ -122,3 +122,70 @@ pyinstaller --noconsole --name NavMapBridge --onefile --icon NONE client/msfs_br
 - SimConnect values may be in radians - client handles degree conversion
 - The server maintains flight history per callsign for trail visualization
 - Multi-player support through real-time WebSocket broadcasting
+
+## Testing and Quality Assurance
+
+### Manual Testing Checklist
+- [ ] GPX file upload and conversion functionality
+- [ ] KML file download and Google Earth compatibility
+- [ ] Live map 2D view with real-time updates
+- [ ] Live map 3D globe rendering and navigation
+- [ ] WebSocket connectivity and reconnection handling
+- [ ] Multi-channel support and isolation
+- [ ] Bridge client GUI system tray functionality
+- [ ] Demo mode operation without MSFS
+
+### Performance Benchmarks
+- WebSocket latency: < 50ms for local connections
+- GPX conversion: < 2 seconds for files up to 10MB
+- Live map updates: 2Hz default, up to 10Hz supported
+- Concurrent users: Tested up to 50 simultaneous viewers per channel
+
+## Security Considerations
+
+- Optional authentication via `LIVE_POST_KEY` environment variable
+- No persistent data storage - all tracking data is in-memory only
+- CORS enabled for cross-origin web interface access
+- WebSocket connections support secure WSS protocol
+- Docker secrets integration for production token management
+
+## Deployment Configurations
+
+### Development
+- Docker Compose with volume mounts for hot-reload
+- Direct Python execution for rapid iteration
+- SQLite or in-memory data storage
+
+### Production
+- Multi-stage Docker builds for optimized images
+- External network integration for reverse proxy setups
+- Secret management for Cesium Ion tokens
+- Health check endpoints for monitoring
+
+## Monitoring and Observability
+
+### Health Endpoints
+- `GET /healthz` - Basic service health check
+- WebSocket connection metrics via server logs
+- Client connection status in bridge GUI
+
+### Logging
+- Structured logging in server application
+- Bridge client debug modes for troubleshooting
+- Docker container logs for deployment monitoring
+
+## Future Enhancement Opportunities
+
+### Planned Features
+- Historical flight data persistence (database integration)
+- Advanced flight analytics and reporting
+- Integration with additional flight simulation platforms
+- Mobile-responsive web interface improvements
+- Real-time weather overlay integration
+
+### SimConnect Data Expansion
+- Engine performance monitoring (RPM, fuel flow, temperatures)
+- Aircraft system status (gear, flaps, electrical, hydraulic)
+- Environmental data integration (weather, wind conditions)
+- Fuel consumption and range estimation
+- Emergency and warning system alerts

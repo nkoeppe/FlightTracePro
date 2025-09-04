@@ -1,11 +1,11 @@
 version: "3.8"
 
 services:
-  navmap:
+  flighttracepro:
     build:
       context: .
       dockerfile: server/Dockerfile
-    container_name: navmap-dev
+    container_name: flighttracepro-dev
     ports:
       - "8000:8000"
     environment:

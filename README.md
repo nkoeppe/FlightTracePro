@@ -1,26 +1,19 @@
-# NavMap
+# FlightTracePro
 
 A professional real-time flight tracking system with GPX to KML conversion capabilities, designed for Microsoft Flight Simulator 2020 integration and multi-user live tracking.
 
-## Features
+## Table of Contents
 
-- **Real-time Flight Tracking**: Live aircraft positioning with 2D/3D visualization
-- **GPX to KML Conversion**: Professional-grade file conversion with preview capabilities
-- **Multi-user Support**: Real-time multiplayer tracking across channels
-- **Cross-platform**: Web-based interface with Windows bridge client
-- **Professional UI**: Modern Material Design-compliant interface
-
-## Architecture
-
-### Server Components
-- **FastAPI Backend**: High-performance web server with WebSocket support
-- **Live Tracking System**: Real-time data broadcasting with channel isolation
-- **File Conversion Engine**: GPX to KML transformation with validation
-
-### Client Components
-- **Windows Bridge**: SimConnect integration for MSFS 2020 data streaming
-- **Web Interface**: Responsive 2D/3D mapping with real-time updates
-- **Multi-protocol Support**: WebSocket and HTTP fallback modes
+- [Quick Start](#quick-start)
+- [Installation](#installation)
+- [Usage Guide](#usage-guide)
+- [Features](#features)
+- [Configuration](#configuration)
+- [API Reference](#api-reference)
+- [Architecture](#architecture)
+- [Development](#development)
+- [Troubleshooting](#troubleshooting)
+- [Support](#support)
 
 ## Quick Start
 
@@ -29,7 +22,7 @@ A professional real-time flight tracking system with GPX to KML conversion capab
 ```bash
 # Prerequisites: Docker and Docker Compose
 git clone <repository-url>
-cd navmap
+cd flighttracepro
 
 # Start development environment with hot-reload
 docker compose -f docker-compose.dev.yml up --build
@@ -49,28 +42,23 @@ docker compose up --build -d
 # - Secret: ./secrets/cesium_ion_token
 ```
 
-## Configuration
-
-### Environment Variables
-
-| Variable | Description | Default | Required |
-|----------|-------------|---------|----------|
-| `LIVE_POST_KEY` | Authentication key for data feeders | None | No |
-| `LIVE_TTL_SEC` | Stale data timeout in seconds | 60 | No |
-| `CESIUM_ION_TOKEN` | Cesium Ion access token for 3D terrain | None | No |
-| `CESIUM_ION_TOKEN_FILE` | Path to Cesium token file | None | No |
-
-### Cesium Ion Integration (Optional)
-
-For enhanced 3D terrain and imagery:
-
-1. Obtain a [Cesium Ion](https://cesium.com/ion/) access token
-2. Set `CESIUM_ION_TOKEN` environment variable
-3. Select "Real" terrain mode in the 3D interface
-
 ## Installation
 
-### Local Python Development
+### Option 1: Docker (Recommended)
+
+The fastest way to get started. Docker handles all dependencies automatically.
+
+```bash
+# Development with hot-reload
+docker compose -f docker-compose.dev.yml up --build
+
+# Production deployment
+docker compose up --build -d
+```
+
+### Option 2: Local Python Development
+
+For development or custom deployments:
 
 ```bash
 # Create virtual environment
@@ -85,7 +73,7 @@ pip install -r server/requirements.txt
 uvicorn server.app:app --host 0.0.0.0 --port 8000
 ```
 
-### Windows Bridge Client
+### Option 3: Windows Bridge Client
 
 #### Command Line Interface
 
@@ -113,8 +101,69 @@ pip install -r client/requirements.txt
 python client/msfs_bridge_gui.pyw
 
 # Build standalone executable
-pyinstaller --noconsole --name NavMapBridge --onefile --icon NONE client/msfs_bridge_gui.pyw
+pyinstaller --noconsole --name FlightTraceProBridge --onefile --icon NONE client/msfs_bridge_gui.pyw
 ```
+
+## Usage Guide
+
+### Getting Started with Live Tracking
+
+1. **Start the Server**
+   - Run `docker compose -f docker-compose.dev.yml up --build`
+   - Open http://localhost:8000 in your browser
+
+2. **Connect Your Flight Simulator**
+   - Install the Windows bridge client (see Installation section)
+   - Launch MSFS 2020 and start a flight
+   - Run the bridge client: `python client/msfs_bridge.py --server ws://localhost:8000 --channel default --callsign YOUR_CALLSIGN --mode ws`
+
+3. **View Live Tracking**
+   - Navigate to "Live Map" tab in the web interface
+   - Select 2D Map or 3D Globe view
+   - Monitor real-time aircraft positions
+   - Click aircraft markers for detailed information
+
+### GPX to KML Conversion
+
+1. Navigate to the main interface
+2. Select "Converter" tab
+3. Upload your GPX file
+4. Preview in 2D/3D view
+5. Download the generated KML file
+
+### Multi-user Features
+
+- **Channels**: Separate flight sessions using different channel names
+- **Real-time Updates**: Automatic position broadcasting to all viewers
+- **Player Management**: Join/leave notifications and presence tracking
+- **Trail Visualization**: Historical flight paths with telemetry data
+
+## Features
+
+- **Real-time Flight Tracking**: Live aircraft positioning with 2D/3D visualization
+- **GPX to KML Conversion**: Professional-grade file conversion with preview capabilities
+- **Multi-user Support**: Real-time multiplayer tracking across channels
+- **Cross-platform**: Web-based interface with Windows bridge client
+- **Professional UI**: Modern Material Design-compliant interface
+
+## Configuration
+
+### Environment Variables
+
+| Variable | Description | Default | Required |
+|----------|-------------|---------|----------|
+| `LIVE_POST_KEY` | Authentication key for data feeders | None | No |
+| `LIVE_TTL_SEC` | Stale data timeout in seconds | 60 | No |
+| `CESIUM_ION_TOKEN` | Cesium Ion access token for 3D terrain | None | No |
+| `CESIUM_ION_TOKEN_FILE` | Path to Cesium token file | None | No |
+
+### Cesium Ion Integration (Optional)
+
+For enhanced 3D terrain and imagery:
+
+1. Obtain a [Cesium Ion](https://cesium.com/ion/) access token
+2. Set `CESIUM_ION_TOKEN` environment variable
+3. Select "Real" terrain mode in the 3D interface
 
 ## API Reference
 
@@ -146,33 +195,23 @@ pyinstaller --noconsole --name NavMapBridge --onefile --icon NONE client/msfs_br
 }
 ```
 
-## Usage
+## Architecture
 
-### GPX Conversion
-1. Navigate to the main interface
-2. Select "Converter" tab
-3. Upload GPX file
-4. Preview in 2D/3D view
-5. Download generated KML
+### Server Components
+- **FastAPI Backend**: High-performance web server with WebSocket support
+- **Live Tracking System**: Real-time data broadcasting with channel isolation
+- **File Conversion Engine**: GPX to KML transformation with validation
 
-### Live Tracking
-1. Start Windows bridge client with MSFS 2020
-2. Navigate to "Live Map" tab
-3. Select 2D Map or 3D Globe view
-4. Monitor real-time aircraft positions
-5. Click aircraft markers for detailed information
-
-### Multi-user Features
-- **Channels**: Separate flight sessions using different channel names
-- **Real-time Updates**: Automatic position broadcasting to all viewers
-- **Player Management**: Join/leave notifications and presence tracking
-- **Trail Visualization**: Historical flight paths with telemetry data
+### Client Components
+- **Windows Bridge**: SimConnect integration for MSFS 2020 data streaming
+- **Web Interface**: Responsive 2D/3D mapping with real-time updates
+- **Multi-protocol Support**: WebSocket and HTTP fallback modes
 
 ## Development
 
 ### Project Structure
 ```
-navmap/
+flighttracepro/
 ├── server/          # FastAPI application
 │   ├── app.py      # Main application file
 │   └── requirements.txt
