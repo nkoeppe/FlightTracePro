@@ -2179,6 +2179,7 @@ INDEX_HTML = """
       let liveMap = null, liveLeafletReady = null;
       let liveMarkers = new Map(); // callsign -> marker
       let livePaths = new Map();   // callsign -> L.polyline
+      let liveHoverPaths = new Map();   // callsign -> hover L.polyline
       let liveTrackData = new Map(); // callsign -> array of {pos, data, timestamp}
       
       function ensureLiveMap() {
@@ -2231,7 +2232,8 @@ INDEX_HTML = """
       // Live 3D Globe
       let liveGlobeViewer = null;
       let live3DEntities = new Map(); // callsign -> entity
-      let live3DPaths = new Map();    // callsign -> Cesium.Cartesian3[]
+      let live3DPaths = new Map();    // callsign -> path entity
+      let live3DTrackData = new Map(); // callsign -> array of track points
       let live3DLastLL = new Map();   // callsign -> {lat,lon}
       
       function ensureLiveGlobe(cb) {
@@ -2258,20 +2260,9 @@ INDEX_HTML = """
                 C.Ion.defaultAccessToken = window.CESIUM_ION_TOKEN;
               }
               
-              const terrainSel = document.getElementById('terrain_mode');
-              const mode = terrainSel ? terrainSel.value : 'flat';
-              let terrainProvider = new C.EllipsoidTerrainProvider();
-              
-              if (mode === 'real' && C.Ion && C.Ion.defaultAccessToken) {
-                try { 
-                  terrainProvider = C.createWorldTerrain(); 
-                } catch(_) { 
-                  terrainProvider = new C.EllipsoidTerrainProvider(); 
-                }
-              }
-              
+              // Start with basic ellipsoid terrain - we'll add real terrain switching later
+              console.log('Creating Cesium viewer...');
               liveGlobeViewer = new C.Viewer('liveglobe', {
-                terrainProvider,
                 animation: false,
                 timeline: false,
                 baseLayerPicker: false,
@@ -2281,19 +2272,10 @@ INDEX_HTML = """
                 selectionIndicator: false,
                 navigationHelpButton: false,
                 fullscreenButton: false,
-                shouldAnimate: false,
-                contextOptions: {
-                  webgl: {
-                    alpha: false,
-                    antialias: true,
-                    preserveDrawingBuffer: false,
-                    failIfMajorPerformanceCaveat: false,
-                    depth: true,
-                    stencil: false,
-                    powerPreference: 'high-performance'
-                  }
-                }
+                shouldAnimate: false
               });
+              
+              console.log('Cesium viewer created successfully:', liveGlobeViewer);
               
               // Performance optimizations
               liveGlobeViewer.scene.requestRenderMode = true;
@@ -2329,6 +2311,39 @@ INDEX_HTML = """
         });
       }
       
+      // Function to update terrain provider dynamically
+      async function updateTerrainProvider() {
+        if (!liveGlobeViewer) return;
+        
+        const C = Cesium;
+        const terrainSel = document.getElementById('terrain_mode');
+        const mode = terrainSel ? terrainSel.value : 'flat';
+        
+        console.log('Updating terrain to:', mode);
+        
+        try {
+          let terrainProvider = new C.EllipsoidTerrainProvider();
+          
+          if (mode === 'real' && C.Ion && C.Ion.defaultAccessToken) {
+            try {
+              terrainProvider = await C.createWorldTerrainAsync();
+              console.log('World terrain created successfully');
+            } catch(e) { 
+              console.warn('Failed to create world terrain, using ellipsoid:', e);
+              terrainProvider = new C.EllipsoidTerrainProvider(); 
+            }
+          }
+          
+          liveGlobeViewer.terrainProvider = terrainProvider;
+          
+          // Force a render to show the change
+          liveGlobeViewer.scene.requestRender();
+          
+          console.log('Terrain successfully changed to:', mode);
+        } catch(e) {
+          console.error('Error updating terrain:', e);
+        }
+      }
 
       // Enhanced player chip functionality
       function updateLiveInfo() {
@@ -2434,6 +2449,14 @@ INDEX_HTML = """
       
       liveTab2D.addEventListener('click', () => setLiveTab('2d'));
       liveTab3D.addEventListener('click', () => setLiveTab('3d'));
+      
+      // Terrain dropdown event listener
+      const terrainSelect = document.getElementById('terrain_mode');
+      if (terrainSelect) {
+        terrainSelect.addEventListener('change', () => {
+          updateTerrainProvider();
+        });
+      }
 
       // Enhanced live connection management
       let liveWs = null, liveConnected = false;
@@ -2745,13 +2768,21 @@ INDEX_HTML = """
                   const pathLine = L.polyline(positions, { 
                     color: color, 
                     weight: 3, 
-                    opacity: 0.7 
+                    opacity: 0.7,
+                    bubblingMouseEvents: false
                   }).addTo(liveMap);
                   
-                  // Add hover functionality to historical track
-                  pathLine.on('mouseover', function(e) {
-                    this.setStyle({ weight: 5, opacity: 1 });
-                    
+                  // Create invisible wider polyline for better hover detection
+                  const hoverLine = L.polyline(positions, { 
+                    color: 'transparent', 
+                    weight: 15, 
+                    opacity: 0,
+                    interactive: true,
+                    bubblingMouseEvents: false
+                  }).addTo(liveMap);
+                  
+                  // Function to find closest track point and show tooltip
+                  function showHistoricalTooltip(e) {
                     // Find closest track point
                     let closestPoint = unique[0];
                     let minDistance = Infinity;
@@ -2789,26 +2820,42 @@ INDEX_HTML = """
                       </div>
                     `;
                     
-                    this.bindTooltip(trackTooltipContent, {
+                    // Show tooltip at the closest track point position for better snapping
+                    hoverLine.bindTooltip(trackTooltipContent, {
                       maxWidth: 320,
                       className: 'aircraft-tooltip',
                       direction: 'top',
                       offset: [0, -10],
-                      sticky: true
-                    }).openTooltip(e.latlng);
+                      sticky: false
+                    }).openTooltip(closestPoint.pos);
+                  }
+                  
+                  // Add hover functionality to historical track
+                  hoverLine.on('mouseover', function(e) {
+                    pathLine.setStyle({ weight: 5, opacity: 1 });
+                    showHistoricalTooltip(e);
                   });
                   
-                  pathLine.on('mouseout', function(e) {
-                    this.setStyle({ weight: 3, opacity: 0.7 });
+                  hoverLine.on('mousemove', function(e) {
+                    showHistoricalTooltip(e);
+                  });
+                  
+                  hoverLine.on('mouseout', function(e) {
+                    pathLine.setStyle({ weight: 3, opacity: 0.7 });
                     this.closeTooltip();
                   });
                   
                   livePaths.set(callsign, pathLine);
+                  liveHoverPaths.set(callsign, hoverLine);
                 } else {
                   // Update existing path
                   const pathLine = livePaths.get(callsign);
+                  const hoverLine = liveHoverPaths.get(callsign);
                   if (pathLine) {
                     pathLine.setLatLngs(positions);
+                  }
+                  if (hoverLine) {
+                    hoverLine.setLatLngs(positions);
                   }
                 }
               }
@@ -2971,7 +3018,18 @@ INDEX_HTML = """
           const pathLine = L.polyline([pos], { 
             color: color, 
             weight: 3, 
-            opacity: 0.7 
+            opacity: 0.7,
+            // Add invisible wider stroke for better hover detection
+            bubblingMouseEvents: false
+          }).addTo(liveMap);
+          
+          // Create invisible wider polyline for better hover detection
+          const hoverLine = L.polyline([pos], { 
+            color: 'transparent', 
+            weight: 15, 
+            opacity: 0,
+            interactive: true,
+            bubblingMouseEvents: false
           }).addTo(liveMap);
           
           // Initialize track data for this aircraft
@@ -2981,11 +3039,8 @@ INDEX_HTML = """
             timestamp: Date.now()
           }]);
           
-          // Add hover and click interactions
-          pathLine.on('mouseover', function(e) {
-            this.setStyle({ weight: 5, opacity: 1 });
-            
-            // Find closest track point to hover position
+          // Function to find closest track point and show tooltip
+          function showTrackTooltip(e) {
             const trackData = liveTrackData.get(cs) || [];
             if (trackData.length > 0) {
               let closestPoint = trackData[0];
@@ -3025,23 +3080,33 @@ INDEX_HTML = """
                 </div>
               `;
               
-              // Show tooltip at hover position
-              this.bindTooltip(trackTooltipContent, {
+              // Show tooltip at the closest track point position for better snapping
+              hoverLine.bindTooltip(trackTooltipContent, {
                 maxWidth: 320,
                 className: 'aircraft-tooltip',
                 direction: 'top',
                 offset: [0, -10],
-                sticky: true
-              }).openTooltip(e.latlng);
+                sticky: false
+              }).openTooltip(closestPoint.pos);
             }
+          }
+          
+          // Add hover and click interactions to the invisible hover line
+          hoverLine.on('mouseover', function(e) {
+            pathLine.setStyle({ weight: 5, opacity: 1 });
+            showTrackTooltip(e);
           });
           
-          pathLine.on('mouseout', function(e) {
-            this.setStyle({ weight: 3, opacity: 0.7 });
+          hoverLine.on('mousemove', function(e) {
+            showTrackTooltip(e);
+          });
+          
+          hoverLine.on('mouseout', function(e) {
+            pathLine.setStyle({ weight: 3, opacity: 0.7 });
             this.closeTooltip();
           });
           
-          pathLine.on('click', function(e) {
+          hoverLine.on('click', function(e) {
             liveFollowCS = cs;
             liveFollow2D = true;
             updateFollowBtn();
@@ -3050,6 +3115,7 @@ INDEX_HTML = """
           });
           
           livePaths.set(cs, pathLine);
+          liveHoverPaths.set(cs, hoverLine);
         } else {
           // Update existing marker
           const marker = liveMarkers.get(cs);
@@ -3059,6 +3125,7 @@ INDEX_HTML = """
           
           // Update flight path and track data
           const pathLine = livePaths.get(cs);
+          const hoverLine = liveHoverPaths.get(cs);
           const trackData = liveTrackData.get(cs) || [];
           
           if (pathLine) {
@@ -3067,6 +3134,7 @@ INDEX_HTML = """
             // Reset path if break_path flag is set or if large jump detected
             if (sample.break_path) {
               pathLine.setLatLngs([pos]);
+              if (hoverLine) hoverLine.setLatLngs([pos]);
               liveTrackData.set(cs, [{
                 pos: pos,
                 data: { ...sample },
@@ -3079,6 +3147,7 @@ INDEX_HTML = """
                 const distance = liveMap.distance(lastPos, pos);
                 if (distance > 20000) { // 20km jump
                   pathLine.setLatLngs([pos]);
+                  if (hoverLine) hoverLine.setLatLngs([pos]);
                   liveTrackData.set(cs, [{
                     pos: pos,
                     data: { ...sample },
@@ -3087,6 +3156,7 @@ INDEX_HTML = """
                 } else {
                   // Add new point to path and track data
                   currentPath.push(pos);
+                  if (hoverLine) hoverLine.addLatLng(pos);
                   trackData.push({
                     pos: pos,
                     data: { ...sample },
@@ -3142,8 +3212,13 @@ INDEX_HTML = """
         const now = C.JulianDate.now();
         const pos = C.Cartesian3.fromDegrees(sample.lon, sample.lat, sample.alt_m || 0);
         
+        // Initialize track data for 3D if not exists
+        if (!live3DTrackData.has(cs)) {
+          live3DTrackData.set(cs, []);
+        }
+        
         if (!live3DEntities.has(cs)) {
-          // Create 3D model entity
+          // Create 3D model entity with better label
           const entity = liveGlobeViewer.entities.add({
             id: cs,
             name: cs,
@@ -3158,21 +3233,45 @@ INDEX_HTML = """
               minimumPixelSize: 64,
               maximumScale: 100,
               runAnimations: false
+            },
+            label: {
+              text: cs,
+              font: '12pt sans-serif',
+              pixelOffset: new C.Cartesian2(0, -60),
+              fillColor: C.Color.YELLOW,
+              outlineColor: C.Color.BLACK,
+              outlineWidth: 2,
+              style: C.LabelStyle.FILL_AND_OUTLINE,
+              horizontalOrigin: C.HorizontalOrigin.CENTER,
+              verticalOrigin: C.VerticalOrigin.BOTTOM,
+              show: true
             }
           });
           
           live3DEntities.set(cs, entity);
           
-          // Create simple polyline entity for flight trail (like 2D)
+          // Create dynamic property for path positions
+          const positionsProperty = new C.CallbackProperty(function(time, result) {
+            const trackData = live3DTrackData.get(cs) || [];
+            return trackData.map(point => point.position);
+          }, false);
+          
+          // Create polyline entity for flight trail with enhanced styling
           const pathEntity = liveGlobeViewer.entities.add({
             id: cs + '_path',
             name: cs + ' Flight Path',
             polyline: {
-              positions: [pos], // Start with current position
-              width: 4,
-              material: C.Color.fromCssColorString(getCallsignColor(cs)).withAlpha(0.8),
+              positions: positionsProperty,
+              width: 3,
+              material: new C.PolylineGlowMaterialProperty({
+                glowPower: 0.2,
+                color: C.Color.fromCssColorString(getCallsignColor(cs))
+              }),
               clampToGround: false,
-              followSurface: false
+              followSurface: false,
+              arcType: C.ArcType.NONE,
+              granularity: C.Math.RADIANS_PER_DEGREE,
+              show: true
             }
           });
           
@@ -3181,6 +3280,7 @@ INDEX_HTML = """
         
         const entity = live3DEntities.get(cs);
         const pathEntity = live3DPaths.get(cs);
+        const trackData = live3DTrackData.get(cs);
         
         if (entity) {
           // Update position and orientation
@@ -3190,24 +3290,58 @@ INDEX_HTML = """
             C.HeadingPitchRoll.fromDegrees(sample.hdg_deg || 0, sample.pitch_deg || 0, sample.roll_deg || 0)
           );
           
-          // Update flight path - exactly like 2D but with altitude
-          if (pathEntity && pathEntity.polyline) {
-            const currentPositions = pathEntity.polyline.positions._value || [];
+          // Handle path updates with proper break_path and distance checking
+          if (sample.break_path) {
+            // Reset path completely
+            trackData.length = 0;
+            trackData.push({
+              position: pos,
+              sample: { ...sample },
+              timestamp: Date.now()
+            });
+          } else if (trackData.length > 0) {
+            // Check distance to last position to avoid unnecessary updates
+            const lastTrackPoint = trackData[trackData.length - 1];
+            const lastPos = lastTrackPoint.position;
+            const distance = C.Cartesian3.distance(lastPos, pos);
             
-            if (sample.break_path) {
-              // Reset path
-              pathEntity.polyline.positions = [pos];
-            } else {
-              // Add new position to the trail
-              const newPositions = [...currentPositions, pos];
+            // Only add new point if distance is significant (>10 meters) to avoid jitter
+            if (distance > 10) {
+              // Check for large jumps (teleportation detection)
+              const lastCartographic = C.Cartographic.fromCartesian(lastPos);
+              const currentCartographic = C.Cartographic.fromCartesian(pos);
+              const geodesic = new C.EllipsoidGeodesic(lastCartographic, currentCartographic);
+              const geodesicDistance = geodesic.surfaceDistance;
               
-              // Keep only last 300 positions for performance
-              if (newPositions.length > 300) {
-                newPositions.shift();
+              if (geodesicDistance > 20000) { // 20km jump - reset path
+                trackData.length = 0;
               }
               
-              pathEntity.polyline.positions = newPositions;
+              trackData.push({
+                position: pos,
+                sample: { ...sample },
+                timestamp: Date.now()
+              });
+              
+              // Keep only last 500 points for performance
+              if (trackData.length > 500) {
+                trackData.shift();
+              }
+            } else {
+              // Update the last position to prevent accumulating small movements
+              trackData[trackData.length - 1] = {
+                position: pos,
+                sample: { ...sample },
+                timestamp: Date.now()
+              };
             }
+          } else {
+            // First point
+            trackData.push({
+              position: pos,
+              sample: { ...sample },
+              timestamp: Date.now()
+            });
           }
         }
         

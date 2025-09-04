@@ -351,6 +351,9 @@ class BridgeWorker(QThread):
 
 
 class MainWindow(QMainWindow):
+    # Signal for update notifications from background thread
+    update_info_signal = Signal(str, str)  # version, download_url
+    
     def __init__(self):
         super().__init__()
         self.setWindowTitle("FlightTracePro Bridge")
@@ -414,6 +417,9 @@ class MainWindow(QMainWindow):
         self.tray.setContextMenu(self.tray_menu)
         self.tray.activated.connect(self._on_tray)
         self.tray.show()
+
+        # Connect update signal
+        self.update_info_signal.connect(self._show_update_prompt)
 
         # Auto-update check (best-effort)
         try:
@@ -579,22 +585,43 @@ class MainWindow(QMainWindow):
 
     def _check_update(self):
         import os, sys, json, tempfile, time
-        import requests
+        try:
+            import requests
+        except ImportError:
+            self.append_log("[update] requests library not available for auto-update")
+            return
         APP_VERSION = os.environ.get('FLIGHTTRACEPRO_APP_VERSION', '0.1.0')
         REPO = os.environ.get('FLIGHTTRACEPRO_REPO', 'nkoeppe/FlightTracePro')  # set to 'owner/repo'
         if REPO == 'your-user/your-repo':
             return
+        
+        self.append_log(f"[update] Checking for updates from {REPO} (current: {APP_VERSION})")
         try:
             r = requests.get(f'https://api.github.com/repos/{REPO}/releases/latest', timeout=5)
             if r.status_code != 200:
                 return
             rel = r.json()
             tag = rel.get('tag_name','')
-            ver = tag.lstrip('v').lstrip('bridge-v')
+            # Handle multiple tag formats: v1.0.0, bridge-v1.0.0, flighttracepro-v1.0.0-10
+            ver = tag
+            # Strip common prefixes
+            for prefix in ['flighttracepro-v', 'bridge-v', 'v']:
+                if ver.startswith(prefix):
+                    ver = ver[len(prefix):]
+                    break
+            
             def parse(v):
-                parts = ''.join(c if (c.isdigit() or c=='.') else ' ' for c in v).split()
-                return tuple(int(p) for p in (parts[0].split('.') if parts else ['0']))
-            if parse(ver) <= parse(APP_VERSION):
+                # Extract version numbers from string like "0.1.0-10" -> ["0", "1", "0", "10"]
+                import re
+                numbers = re.findall(r'\d+', v)
+                return tuple(int(n) for n in numbers) if numbers else (0,)
+            
+            current_version = parse(APP_VERSION)
+            latest_version = parse(ver)
+            self.append_log(f"[update] Current: {APP_VERSION} ({current_version}), Latest: {ver} ({latest_version})")
+            
+            if latest_version <= current_version:
+                self.append_log("[update] Already up to date")
                 return
             # find exe asset
             assets = rel.get('assets', [])
@@ -605,12 +632,41 @@ class MainWindow(QMainWindow):
                     url = a.get('browser_download_url')
                     break
             if not url:
+                self.append_log("[update] No .exe asset found in latest release")
                 return
-            # Prompt
-            from PySide6.QtWidgets import QMessageBox
-            ret = QMessageBox.information(self, 'Update Available', f'New version {ver} available. Update now?', QMessageBox.Yes | QMessageBox.No)
-            if ret != QMessageBox.Yes:
+            
+            # Prompt - need to use signal to show from main thread
+            self.update_info_signal.emit(ver, url)
+            
+        except Exception as e:
+            self.append_log(f"[update] Update check failed: {e}")
+    
+    def _show_update_prompt(self, version, download_url):
+        """Show update prompt in main thread"""
+        from PySide6.QtWidgets import QMessageBox
+        ret = QMessageBox.information(self, 'Update Available', 
+                                    f'New version {version} available. Update now?', 
+                                    QMessageBox.Yes | QMessageBox.No)
+        if ret != QMessageBox.Yes:
+            return
+        
+        # Download and install in background thread
+        import threading
+        t = threading.Thread(target=self._download_and_install, args=(version, download_url), daemon=True)
+        t.start()
+    
+    def _download_and_install(self, version, url):
+        """Download and install update"""
+        try:
+            import os, sys, tempfile
+            try:
+                import requests
+            except ImportError:
+                self.append_log("[update] requests library not available for download")
                 return
+                
+            self.append_log(f"[update] Downloading {version}...")
+            
             # Download
             tmpdir = tempfile.gettempdir()
             newexe = os.path.join(tmpdir, 'FlightTracePro_new.exe')
@@ -620,9 +676,13 @@ class MainWindow(QMainWindow):
                     for chunk in rr.iter_content(chunk_size=8192):
                         if chunk:
                             f.write(chunk)
+            
+            self.append_log(f"[update] Download completed: {newexe}")
+            
             # Only works when frozen
             if not getattr(sys, 'frozen', False):
-                QMessageBox.information(self, 'Update', f'Downloaded new EXE to {newexe}. Please restart manually.')
+                self.append_log(f"[update] Not running as frozen executable, manual restart required")
+                # Can't use QMessageBox from background thread, use log instead
                 return
             cur = os.path.abspath(sys.executable)
             bat = os.path.join(tmpdir, 'flighttracepro_update.bat')
