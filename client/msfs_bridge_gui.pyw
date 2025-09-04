@@ -21,48 +21,70 @@ def meters_from_feet(ft: Optional[float]) -> Optional[float]:
 
 
 class MSFSSource:
-    def __init__(self):
+    def __init__(self, log_cb=None):
         self.sim = None
         self.areq = None
+        self._log = (lambda level, msg: None) if log_cb is None else log_cb
 
     def start(self) -> bool:
-
-        # Help Windows EXE find SimConnect.dll if needed
-        try:
-            import os, sys
-            dll_dir = os.environ.get('FLIGHTTRACEPRO_SIMCONNECT_DLL_DIR')
-            if dll_dir and hasattr(os, 'add_dll_directory'):
-                try:
-                    os.add_dll_directory(dll_dir)
-                except Exception:
-                    pass
-            if hasattr(sys, 'frozen') and getattr(sys, 'frozen'):
-                base = os.path.dirname(sys.executable)
+        # Only apply Windows-specific DLL logic on Windows
+        if sys.platform == 'win32':
+            try:
+                import os, ctypes
+                base = None
+                dll_dir = os.environ.get('FLIGHTTRACEPRO_SIMCONNECT_DLL_DIR')
+                self._log('DEBUG', f"SimConnect probe: EXE={getattr(sys, 'executable', '')}")
+                self._log('DEBUG', f"SimConnect probe: DLL_DIR env={dll_dir!r}")
+                if dll_dir and hasattr(os, 'add_dll_directory'):
+                    try:
+                        os.add_dll_directory(dll_dir)
+                        self._log('DEBUG', f"add_dll_directory OK: {dll_dir}")
+                    except Exception as e:
+                        self._log('DEBUG', f"add_dll_directory failed for {dll_dir}: {e}")
+                if hasattr(sys, 'frozen') and getattr(sys, 'frozen'):
+                    base = os.path.dirname(sys.executable)
+                    if hasattr(os, 'add_dll_directory'):
+                        try:
+                            os.add_dll_directory(base)
+                            self._log('DEBUG', f"add_dll_directory EXE dir OK: {base}")
+                        except Exception as e:
+                            self._log('DEBUG', f"add_dll_directory EXE dir failed: {e}")
+                # Probe typical SDK install dirs
                 if hasattr(os, 'add_dll_directory'):
-                    try: os.add_dll_directory(base)
-                    except Exception: pass
-            # Probe typical SDK install dirs
-            if hasattr(os, 'add_dll_directory'):
-                probes = [
-                    os.path.join(os.environ.get('MSFS_SDK', ''), 'SDK', 'Core Utilities Kit', 'SimConnect SDK', 'lib', 'x64'),
-                    r"C:\\MSFS SDK\\SDK\\Core Utilities Kit\\SimConnect SDK\\lib\\x64",
-                    os.path.join(os.environ.get('ProgramFiles(x86)', r'C:\\Program Files (x86)'), 'Microsoft Games', 'Microsoft Flight Simulator X SDK', 'SDK', 'Core Utilities Kit', 'SimConnect SDK', 'lib', 'x64'),
-                ]
-                for d in probes:
-                    if d and os.path.isdir(d):
-                        try: os.add_dll_directory(d)
-                        except Exception: pass
-        except Exception:
-            pass
+                    probes = [
+                        os.path.join(os.environ.get('MSFS_SDK', ''), 'SDK', 'Core Utilities Kit', 'SimConnect SDK', 'lib', 'x64'),
+                        r"C:\MSFS SDK\SDK\Core Utilities Kit\SimConnect SDK\lib\x64",
+                        os.path.join(os.environ.get('ProgramFiles(x86)', r'C:\Program Files (x86)'), 'Microsoft Games', 'Microsoft Flight Simulator X SDK', 'SDK', 'Core Utilities Kit', 'SimConnect SDK', 'lib', 'x64'),
+                    ]
+                    for d in probes:
+                        if d and os.path.isdir(d):
+                            try:
+                                os.add_dll_directory(d)
+                                self._log('DEBUG', f"add_dll_directory probe OK: {d}")
+                            except Exception as e:
+                                self._log('DEBUG', f"add_dll_directory probe failed for {d}: {e}")
+                # Quick presence test if running frozen and DLL is alongside
+                try:
+                    ctypes.WinDLL('SimConnect.dll')
+                    self._log('DEBUG', "ctypes loaded SimConnect.dll successfully")
+                except Exception as e:
+                    self._log('DEBUG', f"ctypes failed to load SimConnect.dll: {e}")
+            except Exception as e:
+                try: self._log('DEBUG', f"SimConnect probe exception: {e}")
+                except Exception: pass
         try:
             from SimConnect import SimConnect, AircraftRequests
-        except Exception:
+        except Exception as e:
+            self._log('ERROR', f"SimConnect import failed: {e}")
             return False
         try:
             self.sim = SimConnect()
+            self._log('INFO', 'SimConnect() created')
             self.areq = AircraftRequests(self.sim, _time=50)
+            self._log('INFO', 'AircraftRequests ready')
             return True
-        except Exception:
+        except Exception as e:
+            self._log('ERROR', f"SimConnect runtime failure: {e}")
             return False
 
     def read(self):

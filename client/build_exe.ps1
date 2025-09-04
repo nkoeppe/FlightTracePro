@@ -47,6 +47,19 @@ $argsList += @(
   '--specpath', $SpecPath
 )
 
+# Optionally bundle SimConnect.dll if present (local builds only)
+$vendorDll = Join-Path $PSScriptRoot 'vendor\SimConnect\x64\SimConnect.dll'
+if (Test-Path $vendorDll) {
+  Write-Host "[bridge] Bundling vendor SimConnect.dll: $vendorDll" -ForegroundColor Yellow
+  $argsList += @('--add-binary', "$vendorDll;.")
+} elseif ($env:FLIGHTTRACEPRO_SIMCONNECT_DLL_DIR) {
+  $cand = Join-Path $env:FLIGHTTRACEPRO_SIMCONNECT_DLL_DIR 'SimConnect.dll'
+  if (Test-Path $cand) {
+    Write-Host "[bridge] Bundling SimConnect.dll from env dir: $cand" -ForegroundColor Yellow
+    $argsList += @('--add-binary', "$cand;.")
+  }
+}
+
 & $pyi @argsList
 
 Write-Host "[bridge] Built $DistPath\FlightTracePro.exe" -ForegroundColor Green
