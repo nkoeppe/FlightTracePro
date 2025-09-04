@@ -353,7 +353,7 @@ class BridgeWorker(QThread):
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("FlightTracePro (MSFS Bridge)")
+        self.setWindowTitle("FlightTracePro Bridge")
         self.setMinimumWidth(520)
         self.worker: Optional[BridgeWorker] = None
         self.log_entries = []  # Store all log entries with their levels
