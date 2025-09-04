@@ -18,6 +18,23 @@ class MSFSSource:
         self.areq = None
 
     def start(self) -> bool:
+        # Help Windows EXE find SimConnect.dll if needed
+        try:
+            import os, sys
+            dll_dir = os.environ.get('FLIGHTTRACEPRO_SIMCONNECT_DLL_DIR')
+            if dll_dir and hasattr(os, 'add_dll_directory'):
+                try:
+                    os.add_dll_directory(dll_dir)
+                except Exception:
+                    pass
+            # Also try common locations (EXE dir, CWD)
+            if hasattr(sys, 'frozen') and getattr(sys, 'frozen'):
+                base = os.path.dirname(sys.executable)
+                if hasattr(os, 'add_dll_directory'):
+                    try: os.add_dll_directory(base)
+                    except Exception: pass
+        except Exception:
+            pass
         try:
             from SimConnect import SimConnect, AircraftRequests
         except Exception:
