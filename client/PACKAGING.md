@@ -8,7 +8,11 @@ Build a Windows EXE for the NavMap Bridge (GUI).
 
    Option A (PowerShell):
 
+     # Release build (no console)
      ./client/build_exe.ps1
+
+     # Debug build (with console to see import/SimConnect errors)
+     ./client/build_exe.ps1 -Debug
 
    Option B (cmd):
 
@@ -17,7 +21,13 @@ Build a Windows EXE for the NavMap Bridge (GUI).
    Option C (manual):
 
      .venv\Scripts\pip.exe install pyinstaller
-     .venv\Scripts\pyinstaller.exe --noconsole --onefile --name NavMapBridge client\msfs_bridge_gui.pyw --specpath client
+     .venv\Scripts\pyinstaller.exe --clean --noconsole --onefile --name NavMapBridge ^
+       --hidden-import SimConnect ^
+       --collect-all SimConnect ^
+       --collect-submodules websockets ^
+       --collect-submodules requests ^
+       --collect-data certifi ^
+       client\msfs_bridge_gui.pyw --specpath client
 
 3) The EXE will be at `dist/NavMapBridge.exe`.
 
