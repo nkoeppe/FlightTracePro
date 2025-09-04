@@ -16,6 +16,7 @@ jobs:
           python-version: '3.12'
 
       - name: Install dependencies
+        shell: cmd
         run: |
           python -m pip install --upgrade pip
           pip install -r client/requirements.txt
@@ -23,10 +24,10 @@ jobs:
 
       - name: Build EXE
         run: |
-          pyinstaller --clean --noconsole --onefile --name NavMapBridge client\msfs_bridge_gui.pyw --specpath client
+          pyinstaller --clean --noconsole --onefile --name FlightTracePro client\msfs_bridge_gui.pyw --specpath client
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: NavMapBridge
-          path: dist/NavMapBridge.exe
+          name: FlightTracePro
+          path: dist/FlightTracePro.exe

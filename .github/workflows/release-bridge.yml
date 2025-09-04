@@ -33,6 +33,7 @@ jobs:
           pip install pyinstaller
 
       - name: Build EXE
+        shell: cmd
         run: |
           pyinstaller --clean --noconsole --onefile --name FlightTracePro ^
             --hidden-import SimConnect ^
