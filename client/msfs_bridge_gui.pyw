@@ -27,64 +27,60 @@ class MSFSSource:
         self._log = (lambda level, msg: None) if log_cb is None else log_cb
 
     def start(self) -> bool:
-        # Only apply Windows-specific DLL logic on Windows
-        if sys.platform == 'win32':
-            try:
-                import os, ctypes
-                base = None
-                dll_dir = os.environ.get('FLIGHTTRACEPRO_SIMCONNECT_DLL_DIR')
-                self._log('DEBUG', f"SimConnect probe: EXE={getattr(sys, 'executable', '')}")
-                self._log('DEBUG', f"SimConnect probe: DLL_DIR env={dll_dir!r}")
-                if dll_dir and hasattr(os, 'add_dll_directory'):
-                    try:
-                        os.add_dll_directory(dll_dir)
-                        self._log('DEBUG', f"add_dll_directory OK: {dll_dir}")
-                    except Exception as e:
-                        self._log('DEBUG', f"add_dll_directory failed for {dll_dir}: {e}")
-                if hasattr(sys, 'frozen') and getattr(sys, 'frozen'):
-                    base = os.path.dirname(sys.executable)
-                    if hasattr(os, 'add_dll_directory'):
-                        try:
-                            os.add_dll_directory(base)
-                            self._log('DEBUG', f"add_dll_directory EXE dir OK: {base}")
-                        except Exception as e:
-                            self._log('DEBUG', f"add_dll_directory EXE dir failed: {e}")
-                # Probe typical SDK install dirs
-                if hasattr(os, 'add_dll_directory'):
-                    probes = [
-                        os.path.join(os.environ.get('MSFS_SDK', ''), 'SDK', 'Core Utilities Kit', 'SimConnect SDK', 'lib', 'x64'),
-                        r"C:\MSFS SDK\SDK\Core Utilities Kit\SimConnect SDK\lib\x64",
-                        os.path.join(os.environ.get('ProgramFiles(x86)', r'C:\Program Files (x86)'), 'Microsoft Games', 'Microsoft Flight Simulator X SDK', 'SDK', 'Core Utilities Kit', 'SimConnect SDK', 'lib', 'x64'),
-                    ]
-                    for d in probes:
-                        if d and os.path.isdir(d):
-                            try:
-                                os.add_dll_directory(d)
-                                self._log('DEBUG', f"add_dll_directory probe OK: {d}")
-                            except Exception as e:
-                                self._log('DEBUG', f"add_dll_directory probe failed for {d}: {e}")
-                # Quick presence test if running frozen and DLL is alongside
-                try:
-                    ctypes.WinDLL('SimConnect.dll')
-                    self._log('DEBUG', "ctypes loaded SimConnect.dll successfully")
-                except Exception as e:
-                    self._log('DEBUG', f"ctypes failed to load SimConnect.dll: {e}")
-            except Exception as e:
-                try: self._log('DEBUG', f"SimConnect probe exception: {e}")
-                except Exception: pass
+        self._log('INFO', "Attempting SimConnect initialization...")
+        
+        # Step 1: Try to import SimConnect
         try:
+            self._log('DEBUG', "Importing SimConnect module...")
             from SimConnect import SimConnect, AircraftRequests
-        except Exception as e:
-            self._log('ERROR', f"SimConnect import failed: {e}")
+            self._log('INFO', "✓ SimConnect module imported successfully")
+        except ImportError as e:
+            self._log('ERROR', f"✗ SimConnect module not found: {e}")
+            self._log('ERROR', "Install with: pip install SimConnect==0.4.26")
             return False
+        except Exception as e:
+            self._log('ERROR', f"✗ SimConnect import failed: {e}")
+            return False
+        
+        # Step 2: Try to create SimConnect instance with different approaches
+        connection_attempts = [
+            ("Default connection", lambda: SimConnect()),
+            ("Named connection", lambda: SimConnect(auto_connect=False)),
+            ("Local connection", lambda: SimConnect(auto_connect=True)),
+        ]
+        
+        for attempt_name, connect_func in connection_attempts:
+            try:
+                self._log('DEBUG', f"Trying {attempt_name}...")
+                self.sim = connect_func()
+                self._log('INFO', f"✓ {attempt_name} successful")
+                break
+            except Exception as e:
+                self._log('DEBUG', f"✗ {attempt_name} failed: {e}")
+                continue
+        
+        if not self.sim:
+            self._log('ERROR', "✗ All SimConnect connection attempts failed")
+            self._log('ERROR', "Troubleshooting:")
+            self._log('ERROR', "1. Make sure MSFS 2020 is running and you're in a flight")
+            self._log('ERROR', "2. Check MSFS Options > General > Developers > Enable SimConnect")
+            self._log('ERROR', "3. Try restarting MSFS completely")
+            self._log('ERROR', "4. Run as Administrator")
+            return False
+        
+        # Step 3: Try to create AircraftRequests
         try:
-            self.sim = SimConnect()
-            self._log('INFO', 'SimConnect() created')
+            self._log('DEBUG', "Creating AircraftRequests...")
             self.areq = AircraftRequests(self.sim, _time=50)
-            self._log('INFO', 'AircraftRequests ready')
+            self._log('INFO', "✓ AircraftRequests ready - SimConnect fully initialized!")
             return True
         except Exception as e:
-            self._log('ERROR', f"SimConnect runtime failure: {e}")
+            self._log('ERROR', f"✗ Failed to create AircraftRequests: {e}")
+            try:
+                self.sim.quit()
+            except:
+                pass
+            self.sim = None
             return False
 
     def read(self):

@@ -18,47 +18,73 @@ class MSFSSource:
         self.areq = None
 
     def start(self) -> bool:
-        # Only apply Windows-specific DLL logic on Windows
-        if sys.platform == 'win32':
-            try:
-                import os
-                dll_dir = os.environ.get('FLIGHTTRACEPRO_SIMCONNECT_DLL_DIR')
-                if dll_dir and hasattr(os, 'add_dll_directory'):
-                    try:
-                        os.add_dll_directory(dll_dir)
-                    except Exception:
-                        pass
-                # Also try common locations (EXE dir, CWD)
-                if hasattr(sys, 'frozen') and getattr(sys, 'frozen'):
-                    base = os.path.dirname(sys.executable)
-                    if hasattr(os, 'add_dll_directory'):
-                        try: os.add_dll_directory(base)
-                        except Exception: pass
-                # Probe typical SDK install dirs
-                if hasattr(os, 'add_dll_directory'):
-                    probes = [
-                        os.path.join(os.environ.get('MSFS_SDK', ''), 'SDK', 'Core Utilities Kit', 'SimConnect SDK', 'lib', 'x64'),
-                        r"C:\MSFS SDK\SDK\Core Utilities Kit\SimConnect SDK\lib\x64",
-                        os.path.join(os.environ.get('ProgramFiles(x86)', r'C:\Program Files (x86)'), 'Microsoft Games', 'Microsoft Flight Simulator X SDK', 'SDK', 'Core Utilities Kit', 'SimConnect SDK', 'lib', 'x64'),
-                    ]
-                    for d in probes:
-                        if d and os.path.isdir(d):
-                            try: os.add_dll_directory(d)
-                            except Exception: pass
-            except Exception:
-                pass
+        print("[msfs] Attempting SimConnect initialization...", file=sys.stderr)
+        
+        # Step 0: Check if MSFS process is running
         try:
+            import subprocess
+            result = subprocess.run(['tasklist', '/FI', 'IMAGENAME eq FlightSimulator.exe'], 
+                                  capture_output=True, text=True, shell=True)
+            if 'FlightSimulator.exe' in result.stdout:
+                print("[msfs] ✓ Flight Simulator process found", file=sys.stderr)
+            else:
+                print("[msfs] ⚠ Flight Simulator process NOT found", file=sys.stderr)
+                print("[msfs] Make sure MSFS 2020 is running", file=sys.stderr)
+        except Exception as e:
+            print(f"[msfs] Could not check MSFS process: {e}", file=sys.stderr)
+        
+        # Step 1: Try to import SimConnect
+        try:
+            print("[msfs] Importing SimConnect module...", file=sys.stderr)
             from SimConnect import SimConnect, AircraftRequests
-        except Exception:
-            print("[msfs] SimConnect not installed. Install with: pip install SimConnect", file=sys.stderr)
+            print("[msfs] ✓ SimConnect module imported successfully", file=sys.stderr)
+        except ImportError as e:
+            print(f"[msfs] ✗ SimConnect module not found: {e}", file=sys.stderr)
+            print("[msfs] Install with: pip install SimConnect==0.4.26", file=sys.stderr)
             return False
+        except Exception as e:
+            print(f"[msfs] ✗ SimConnect import failed: {e}", file=sys.stderr)
+            return False
+        
+        # Step 2: Try to create SimConnect instance with different approaches
+        connection_attempts = [
+            ("Default connection", lambda: SimConnect()),
+            ("Named connection", lambda: SimConnect(auto_connect=False)),
+            ("Local connection", lambda: SimConnect(auto_connect=True)),
+        ]
+        
+        for attempt_name, connect_func in connection_attempts:
+            try:
+                print(f"[msfs] Trying {attempt_name}...", file=sys.stderr)
+                self.sim = connect_func()
+                print(f"[msfs] ✓ {attempt_name} successful", file=sys.stderr)
+                break
+            except Exception as e:
+                print(f"[msfs] ✗ {attempt_name} failed: {e}", file=sys.stderr)
+                continue
+        
+        if not self.sim:
+            print("[msfs] ✗ All SimConnect connection attempts failed", file=sys.stderr)
+            print("[msfs] Troubleshooting:", file=sys.stderr)
+            print("[msfs] 1. Make sure MSFS 2020 is running and you're in a flight", file=sys.stderr)
+            print("[msfs] 2. Check MSFS Options > General > Developers > Enable SimConnect", file=sys.stderr)
+            print("[msfs] 3. Try restarting MSFS completely", file=sys.stderr)
+            print("[msfs] 4. Check Windows permissions", file=sys.stderr)
+            return False
+        
+        # Step 3: Try to create AircraftRequests
         try:
-            self.sim = SimConnect()
-            # Use a small poll interval to keep values fresh
+            print("[msfs] Creating AircraftRequests...", file=sys.stderr)
             self.areq = AircraftRequests(self.sim, _time=50)
+            print("[msfs] ✓ AircraftRequests ready", file=sys.stderr)
             return True
         except Exception as e:
-            print(f"[msfs] Failed to connect SimConnect: {e}", file=sys.stderr)
+            print(f"[msfs] ✗ Failed to create AircraftRequests: {e}", file=sys.stderr)
+            try:
+                self.sim.quit()
+            except:
+                pass
+            self.sim = None
             return False
 
     def read(self):
