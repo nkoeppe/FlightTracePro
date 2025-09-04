@@ -41,6 +41,17 @@ class MSFSSource:
                 if hasattr(os, 'add_dll_directory'):
                     try: os.add_dll_directory(base)
                     except Exception: pass
+            # Probe typical SDK install dirs
+            if hasattr(os, 'add_dll_directory'):
+                probes = [
+                    os.path.join(os.environ.get('MSFS_SDK', ''), 'SDK', 'Core Utilities Kit', 'SimConnect SDK', 'lib', 'x64'),
+                    r"C:\\MSFS SDK\\SDK\\Core Utilities Kit\\SimConnect SDK\\lib\\x64",
+                    os.path.join(os.environ.get('ProgramFiles(x86)', r'C:\\Program Files (x86)'), 'Microsoft Games', 'Microsoft Flight Simulator X SDK', 'SDK', 'Core Utilities Kit', 'SimConnect SDK', 'lib', 'x64'),
+                ]
+                for d in probes:
+                    if d and os.path.isdir(d):
+                        try: os.add_dll_directory(d)
+                        except Exception: pass
         except Exception:
             pass
         try:
