@@ -12,9 +12,11 @@ services:
       - LIVE_POST_KEY=${LIVE_POST_KEY:-}
       - CESIUM_ION_TOKEN=${CESIUM_ION_TOKEN:-}
     # Hot-reload and live-edit server/static during development
-    # Use same entrypoint as prod for WebSocket stability (no reload)
-    command: ["--host", "0.0.0.0", "--port", "8000"]
+    # Appends to Dockerfile ENTRYPOINT (uvicorn app:app ...)
+    command: ["--host", "0.0.0.0", "--port", "8000", "--reload", "--reload-dir", "/app", "--reload-dir", "/app/static", "--reload-delay", "0.25"]
     volumes:
-      - ./server/app.py:/app/app.py:ro
-      - ./server/gpx_to_kml.py:/app/gpx_to_kml.py:ro
+      - ./server/app.py:/app/app.py:rw
+      - ./server/gpx_to_kml.py:/app/gpx_to_kml.py:rw
       - ./static:/app/static:ro
+    env_file:
+      - .env
