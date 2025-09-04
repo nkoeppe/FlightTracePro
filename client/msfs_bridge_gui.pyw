@@ -327,6 +327,7 @@ class MainWindow(QMainWindow):
         self.setWindowTitle("FlightTracePro (MSFS Bridge)")
         self.setMinimumWidth(520)
         self.worker: Optional[BridgeWorker] = None
+        self.log_entries = []  # Store all log entries with their levels
 
         w = QWidget(); self.setCentralWidget(w)
         lay = QGridLayout(); w.setLayout(lay)
@@ -360,8 +361,16 @@ class MainWindow(QMainWindow):
         lay.addWidget(QLabel("Logs"), row, 0)
         self.logView = QTextEdit(); self.logView.setReadOnly(True); self.logView.setMinimumHeight(200)
         lay.addWidget(self.logView, row, 1, 1, 2)
-        self.logLevel = QComboBox(); self.logLevel.addItems(["DEBUG","INFO","WARN","ERROR"]); self.logLevel.setCurrentText("INFO"); lay.addWidget(self.logLevel, row, 3); row += 1
+        
+        # Log controls in vertical layout
+        logControls = QVBoxLayout()
+        self.logLevel = QComboBox(); self.logLevel.addItems(["DEBUG","INFO","WARN","ERROR"]); self.logLevel.setCurrentText("INFO"); logControls.addWidget(self.logLevel)
+        self.btnClearLogs = QPushButton("Clear Logs"); logControls.addWidget(self.btnClearLogs)
+        logControlsWidget = QWidget(); logControlsWidget.setLayout(logControls)
+        lay.addWidget(logControlsWidget, row, 3); row += 1
+        
         self.logLevel.currentTextChanged.connect(self.on_level_changed)
+        self.btnClearLogs.clicked.connect(self.clear_logs)
 
         self.btnConnect.clicked.connect(self.on_connect)
         self.btnDisconnect.clicked.connect(self.on_disconnect)
@@ -455,7 +464,29 @@ class MainWindow(QMainWindow):
         except Exception:
             from datetime import datetime as _dt
             ts = _dt.now().strftime("%H:%M:%S")
-        self.logView.append(f"[{ts}] {msg}")
+        
+        # Extract log level from message if present
+        level_value = 20  # Default to INFO level
+        if msg.startswith('[') and '] ' in msg:
+            level_part = msg.split('] ', 1)[0][1:]
+            level_value = LEVELS.get(level_part.upper(), 20)
+        
+        display_text = f"[{ts}] {msg}"
+        
+        # Store the log entry
+        log_entry = {
+            'timestamp': ts,
+            'message': msg,
+            'level_value': level_value,
+            'display_text': display_text
+        }
+        self.log_entries.append(log_entry)
+        
+        # Only display if it matches current filter level
+        current_level = self.logLevel.currentText()
+        min_level = LEVELS.get(current_level.upper(), 20)
+        if level_value >= min_level:
+            self.logView.append(display_text)
 
     def load_recents(self):
         rec = self.settings.value("recentServers", [], type=list)
@@ -489,9 +520,27 @@ class MainWindow(QMainWindow):
         self.save_recent_server(self.server.currentText().strip())
 
     @Slot()
+    def clear_logs(self):
+        self.log_entries.clear()
+        self.logView.clear()
+        self.append_log("Logs cleared")
+
+    @Slot()
     def on_level_changed(self):
         if self.worker:
             self.worker.set_level(self.logLevel.currentText())
+        # Filter logs based on new level
+        self.filter_logs()
+        
+    def filter_logs(self):
+        """Filter displayed logs based on current log level"""
+        current_level = self.logLevel.currentText()
+        min_level = LEVELS.get(current_level.upper(), 20)
+        
+        self.logView.clear()
+        for entry in self.log_entries:
+            if entry['level_value'] >= min_level:
+                self.logView.append(entry['display_text'])
 
     # --- Self-update (GitHub Releases) ---
     def check_update_async(self):
