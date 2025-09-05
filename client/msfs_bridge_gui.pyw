@@ -693,9 +693,9 @@ set "TARGET_EXE={cur}"
 set "NEW_EXE={newexe}"
 set "LOGFILE={log_file}"
 
-echo [%%date%% %%time%%] FlightTracePro TEST Auto-Updater Started >> %%LOGFILE%%
-echo [%%date%% %%time%%] Target: %%TARGET_EXE%% >> %%LOGFILE%%
-echo [%%date%% %%time%%] New EXE: %%NEW_EXE%% >> %%LOGFILE%%
+echo [%date% %time%] FlightTracePro TEST Auto-Updater Started >> %LOGFILE%
+echo [%date% %time%] Target: %TARGET_EXE% >> %LOGFILE%
+echo [%date% %time%] New EXE: %NEW_EXE% >> %LOGFILE%
 
 echo.
 echo ========================================
@@ -703,38 +703,38 @@ echo FlightTracePro TEST Auto-Updater
 echo ========================================
 echo.
 echo This is a TEST - no actual update will occur
-echo Log file: %%LOGFILE%%
+echo Log file: %LOGFILE%
 echo.
 
 echo Step 1: Waiting for application to close...
-echo [%%date%% %%time%%] Step 1: Waiting for app to close... >> %%LOGFILE%%
+echo [%date% %time%] Step 1: Waiting for app to close... >> %LOGFILE%
 timeout /t 2 /nobreak >nul
 
 echo Step 2: TEST - Would create backup here...
-echo [%%date%% %%time%%] Step 2: TEST backup creation >> %%LOGFILE%%
+echo [%date% %time%] Step 2: TEST backup creation >> %LOGFILE%
 
 echo Step 3: TEST - Would install new version here...
-echo [%%date%% %%time%%] Step 3: TEST installation >> %%LOGFILE%%
+echo [%date% %time%] Step 3: TEST installation >> %LOGFILE%
 
 echo Step 4: TEST - Would clean up here...
-echo [%%date%% %%time%%] Step 4: TEST cleanup >> %%LOGFILE%%
+echo [%date% %time%] Step 4: TEST cleanup >> %LOGFILE%
 
 echo Step 5: Restarting application...
-echo [%%date%% %%time%%] Step 5: Restarting application... >> %%LOGFILE%%
+echo [%date% %time%] Step 5: Restarting application... >> %LOGFILE%
 timeout /t 2 /nobreak >nul
 
-echo Starting: %%TARGET_EXE%%
-echo [%%date%% %%time%%] Starting: %%TARGET_EXE%% >> %%LOGFILE%%
-start "" %%TARGET_EXE%%
+echo Starting: %TARGET_EXE%
+echo [%date% %time%] Starting: %TARGET_EXE% >> %LOGFILE%
+start "" %TARGET_EXE%
 
 echo.
 echo TEST UPDATE COMPLETE! Application should restart now.
-echo [%%date%% %%time%%] TEST update process completed >> %%LOGFILE%%
+echo [%date% %time%] TEST update process completed >> %LOGFILE%
 timeout /t 3 /nobreak >nul
 
 REM Cleanup test files
-echo [%%date%% %%time%%] Cleaning up test files... >> %%LOGFILE%%
-del %%NEW_EXE%% >nul 2>&1
+echo [%date% %time%] Cleaning up test files... >> %LOGFILE%
+del %NEW_EXE% >nul 2>&1
 del "%~f0" >nul 2>&1
 """)
             
@@ -854,49 +854,54 @@ set TARGET_EXE={cur_safe}
 set NEW_EXE={newexe_safe}
 set LOGFILE={log_safe}
 
-echo [%%date%% %%time%%] FlightTracePro Auto-Updater Started >> %%LOGFILE%%
-echo [%%date%% %%time%%] Target: %%TARGET_EXE%% >> %%LOGFILE%%
-echo [%%date%% %%time%%] New EXE: %%NEW_EXE%% >> %%LOGFILE%%
-echo [%%date%% %%time%%] Batch: %%~f0 >> %%LOGFILE%%
+REM Normalize paths for operations needing suffixes
+set TARGET_NOQUOTE=%TARGET_EXE:"=%
+set NEW_NOQUOTE=%NEW_EXE:"=%
+set BACKUP_EXE=%TARGET_NOQUOTE%.backup
+
+echo [%date% %time%] FlightTracePro Auto-Updater Started >> %LOGFILE%
+echo [%date% %time%] Target: %TARGET_EXE% >> %LOGFILE%
+echo [%date% %time%] New EXE: %NEW_EXE% >> %LOGFILE%
+echo [%date% %time%] Batch: %~f0 >> %LOGFILE%
 
 echo.
 echo ========================================
 echo FlightTracePro Auto-Updater
 echo ========================================
 echo.
-echo Log file: %%LOGFILE%%
+echo Log file: %LOGFILE%
 
 echo Step 1: Waiting for application to close...
-echo [%%date%% %%time%%] Step 1: Waiting for app to close... >> %%LOGFILE%%
+echo [%date% %time%] Step 1: Waiting for app to close... >> %LOGFILE%
 timeout /t 5 /nobreak >nul
 
 echo Step 2: Extended wait for file system...
-echo [%%date%% %%time%%] Step 2: Extended wait for file system... >> %%LOGFILE%%
+echo [%date% %time%] Step 2: Extended wait for file system... >> %LOGFILE%
 echo Waiting 3 more seconds for Windows to fully release file locks...
 timeout /t 3 /nobreak >nul
-echo [%%date%% %%time%%] Extended wait completed >> %%LOGFILE%%
+echo [%date% %time%] Extended wait completed >> %LOGFILE%
 
 echo Step 3: Creating backup...
-echo [%%date%% %%time%%] Step 3: Creating backup... >> %%LOGFILE%%
-if exist %%TARGET_EXE%% (
-    copy %%TARGET_EXE%% %%TARGET_EXE%%.backup >nul 2>&1
+echo [%date% %time%] Step 3: Creating backup... >> %LOGFILE%
+if exist %TARGET_EXE% (
+    copy %TARGET_EXE% %BACKUP_EXE% >nul 2>&1
     if errorlevel 1 (
-        echo [%%date%% %%time%%] ERROR: Could not create backup! >> %%LOGFILE%%
+        echo [%date% %time%] ERROR: Could not create backup! >> %LOGFILE%
         echo ERROR: Could not create backup!
         pause
         exit /b 1
     ) else (
-        echo [%%date%% %%time%%] Backup created successfully >> %%LOGFILE%%
+        echo [%date% %time%] Backup created successfully >> %LOGFILE%
     )
 ) else (
-    echo [%%date%% %%time%%] ERROR: Original EXE not found: %%TARGET_EXE%% >> %%LOGFILE%%
+    echo [%date% %time%] ERROR: Original EXE not found: %TARGET_EXE% >> %LOGFILE%
     echo ERROR: Original EXE not found!
     pause
     exit /b 1
 )
 
 echo Step 4: Installing new version...
-echo [%%date%% %%time%%] Step 4: Installing new version... >> %%LOGFILE%%
+echo [%date% %time%] Step 4: Installing new version... >> %LOGFILE%
 
 REM Wait a moment for any file system delays
 timeout /t 2 /nobreak >nul
@@ -905,59 +910,59 @@ REM Check if new EXE exists with retry logic
 set FILE_CHECK_RETRY=0
 :check_new_exe
 set /a FILE_CHECK_RETRY+=1
-if exist %%NEW_EXE%% (
-    echo [%%date%% %%time%%] New EXE found on check attempt !FILE_CHECK_RETRY! >> %%LOGFILE%%
+if exist %NEW_EXE% (
+    echo [%date% %time%] New EXE found on check attempt !FILE_CHECK_RETRY! >> %LOGFILE%
     goto file_check_success
 )
 
-echo [%%date%% %%time%%] New EXE check attempt !FILE_CHECK_RETRY!/5: File not found >> %%LOGFILE%%
+echo [%date% %time%] New EXE check attempt !FILE_CHECK_RETRY!/5: File not found >> %LOGFILE%
 if !FILE_CHECK_RETRY! LSS 5 (
     timeout /t 1 /nobreak >nul
     goto check_new_exe
 )
 
-echo [%%date%% %%time%%] ERROR: New EXE not found after 5 attempts: %%NEW_EXE%% >> %%LOGFILE%%
+echo [%date% %time%] ERROR: New EXE not found after 5 attempts: %NEW_EXE% >> %LOGFILE%
 echo ERROR: New EXE not found after 5 attempts!
 pause
 exit /b 1
 
 :file_check_success
 
-echo [%%date%% %%time%%] New EXE found, attempting to install with aggressive retry... >> %%LOGFILE%%
+echo [%date% %time%] New EXE found, attempting to install with aggressive retry... >> %LOGFILE%
 
 REM Simple but aggressive retry with longer waits
 set UPDATE_RETRY=0
 :update_retry
 set /a UPDATE_RETRY+=1
-echo [%%date%% %%time%%] Update attempt !UPDATE_RETRY!/20... >> %%LOGFILE%%
+echo [%date% %time%] Update attempt !UPDATE_RETRY!/20... >> %LOGFILE%
 echo Installing new version... (attempt !UPDATE_RETRY!/20)
 
 REM Delete target first to reduce conflicts
-if exist %%TARGET_EXE%% del %%TARGET_EXE%% >nul 2>&1
+if exist %TARGET_EXE% del %TARGET_EXE% >nul 2>&1
 
 REM Wait a moment for filesystem
 timeout /t 1 /nobreak >nul
 
 REM Copy with /Y flag for overwrite
-copy /Y %%NEW_EXE%% %%TARGET_EXE%% >nul 2>&1
+copy /Y %NEW_EXE% %TARGET_EXE% >nul 2>&1
 
 REM Verify the copy worked by checking if file exists and has correct size
-if exist %%TARGET_EXE%% (
-    echo [%%date%% %%time%%] Copy appeared successful, verifying file... >> %%LOGFILE%%
+if exist %TARGET_EXE% (
+    echo [%date% %time%] Copy appeared successful, verifying file... >> %LOGFILE%
     REM Compare file sizes to ensure copy was complete
-    for %%A in (%%NEW_EXE%%) do set NEWSIZE=%%~zA
-    for %%B in (%%TARGET_EXE%%) do set CURSIZE=%%~zB
+    for %%A in (%NEW_EXE%) do set NEWSIZE=%%~zA
+    for %%B in (%TARGET_EXE%) do set CURSIZE=%%~zB
     
     if "!NEWSIZE!"=="!CURSIZE!" (
-        echo [%%date%% %%time%%] File sizes match - update successful! >> %%LOGFILE%%
+        echo [%date% %time%] File sizes match - update successful! >> %LOGFILE%
         echo Update successful! File sizes match.
         goto update_success
     ) else (
-        echo [%%date%% %%time%%] File size mismatch - copy incomplete (New: !NEWSIZE!, Current: !CURSIZE!) >> %%LOGFILE%%
+        echo [%date% %time%] File size mismatch - copy incomplete (New: !NEWSIZE!, Current: !CURSIZE!) >> %LOGFILE%
         echo File size mismatch - copy incomplete
     )
 ) else (
-    echo [%%date%% %%time%%] Target file does not exist after copy >> %%LOGFILE%%
+    echo [%date% %time%] Target file does not exist after copy >> %LOGFILE%
     echo Copy failed - target file missing
 )
 
@@ -971,12 +976,12 @@ if !UPDATE_RETRY! LSS 20 (
         set WAIT_TIME=3
     )
     
-    echo [%%date%% %%time%%] Copy failed, waiting !WAIT_TIME! seconds before retry... >> %%LOGFILE%%
+    echo [%date% %time%] Copy failed, waiting !WAIT_TIME! seconds before retry... >> %LOGFILE%
     echo Copy failed, waiting !WAIT_TIME! seconds before retry...
     timeout /t !WAIT_TIME! /nobreak >nul
     goto update_retry
 ) else (
-    echo [%%date%% %%time%%] ERROR: Update failed after 20 attempts! >> %%LOGFILE%%
+    echo [%date% %time%] ERROR: Update failed after 20 attempts! >> %LOGFILE%
     echo ERROR: Update failed after 20 attempts!
     echo.  
     echo This is likely caused by:
@@ -999,33 +1004,33 @@ if !UPDATE_RETRY! LSS 20 (
 :update_success
 
 echo Step 5: Cleaning up...
-echo [%%date%% %%time%%] Step 5: Cleaning up... >> %%LOGFILE%%
-del %%TARGET_EXE%%.backup >nul 2>&1
-del %%NEW_EXE%% >nul 2>&1
+echo [%date% %time%] Step 5: Cleaning up... >> %LOGFILE%
+del %BACKUP_EXE% >nul 2>&1
+del %NEW_EXE% >nul 2>&1
 
 echo Step 6: Restarting application...
-echo [%%date%% %%time%%] Step 6: Restarting application... >> %%LOGFILE%%
+echo [%date% %time%] Step 6: Restarting application... >> %LOGFILE%
 timeout /t 2 /nobreak >nul
 
-echo Starting: %%TARGET_EXE%%
-echo [%%date%% %%time%%] Starting: %%TARGET_EXE%% >> %%LOGFILE%%
-start "" %%TARGET_EXE%%
+echo Starting: %TARGET_EXE%
+echo [%date% %time%] Starting: %TARGET_EXE% >> %LOGFILE%
+start "" %TARGET_EXE%
 if errorlevel 1 (
-    echo [%%date%% %%time%%] ERROR: Failed to start application >> %%LOGFILE%%
+    echo [%date% %time%] ERROR: Failed to start application >> %LOGFILE%
     echo ERROR: Failed to start application!
     pause
     exit /b 1
 ) else (
-    echo [%%date%% %%time%%] Application started successfully >> %%LOGFILE%%
+    echo [%date% %time%] Application started successfully >> %LOGFILE%
 )
 
 echo.
 echo Update complete! Application should restart now.
-echo [%%date%% %%time%%] Update process completed >> %%LOGFILE%%
+echo [%date% %time%] Update process completed >> %LOGFILE%
 timeout /t 3 /nobreak >nul
 
 REM Self-delete (but keep log file for debugging)
-echo [%%date%% %%time%%] Self-deleting batch file... >> %%LOGFILE%%
+echo [%date% %time%] Self-deleting batch file... >> %LOGFILE%
 del "%~f0" >nul 2>&1
 """)
             

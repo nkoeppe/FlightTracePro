@@ -3036,7 +3036,7 @@ INDEX_HTML = """
             orientation: C.Transforms.headingPitchRollQuaternion(
               pos,
               C.HeadingPitchRoll.fromDegrees(
-                (orientation.hdg || 0) + 90, // Add 90 degrees to fix aircraft orientation
+                (orientation.hdg || 0), // NO ROTATION - showing raw model orientation
                 orientation.pitch || 0, 
                 orientation.roll || 0
               )
@@ -3124,7 +3124,7 @@ INDEX_HTML = """
           entity.orientation = C.Transforms.headingPitchRollQuaternion(
             pos,
             C.HeadingPitchRoll.fromDegrees(
-              orientation.hdg || 0, 
+              (orientation.hdg || 0), // NO ROTATION - showing raw model orientation
               orientation.pitch || 0, 
               orientation.roll || 0
             )
@@ -3630,17 +3630,18 @@ INDEX_HTML = """
         // Create axis length (in meters)
         const axisLength = 100.0;
         
-        // Calculate end points for each axis in world coordinates
+        // Create a simple ENU (East-North-Up) coordinate system to see raw model orientation
+        // This will show us what the model SHOULD be oriented to
         const transform = C.Transforms.eastNorthUpToFixedFrame(aircraftPosition);
         
-        // Calculate axis end points
+        // Calculate axis end points in world coordinates (no model rotation applied)
         const xAxisEnd = C.Matrix4.multiplyByPoint(transform, new C.Cartesian3(axisLength, 0, 0), new C.Cartesian3());
         const yAxisEnd = C.Matrix4.multiplyByPoint(transform, new C.Cartesian3(0, axisLength, 0), new C.Cartesian3());
         const zAxisEnd = C.Matrix4.multiplyByPoint(transform, new C.Cartesian3(0, 0, axisLength), new C.Cartesian3());
         
         // Create coordinate system axes using polylines with absolute positions
         const axes = {
-          // X-axis (Red) - East/Right
+          // X-axis (Red) - Model's Right Wing (should be motion direction after fix)
           x: liveGlobeViewer.entities.add({
             polyline: {
               positions: [aircraftPosition, xAxisEnd],
@@ -3656,7 +3657,7 @@ INDEX_HTML = """
           xLabel: liveGlobeViewer.entities.add({
             position: xAxisEnd,
             label: {
-              text: 'X (East/Right)',
+              text: 'X SHOULD = RIGHT WING/MOTION',
               font: '14pt sans-serif',
               fillColor: C.Color.RED,
               outlineColor: C.Color.BLACK,
@@ -3668,7 +3669,7 @@ INDEX_HTML = """
             }
           }),
           
-          // Y-axis (Green) - North/Forward
+          // Y-axis (Green) - Where the nose should point
           y: liveGlobeViewer.entities.add({
             polyline: {
               positions: [aircraftPosition, yAxisEnd],
@@ -3684,7 +3685,7 @@ INDEX_HTML = """
           yLabel: liveGlobeViewer.entities.add({
             position: yAxisEnd,
             label: {
-              text: 'Y (North/Forward)',
+              text: 'Y SHOULD = NOSE/FORWARD',
               font: '14pt sans-serif',
               fillColor: C.Color.LIME,
               outlineColor: C.Color.BLACK,
