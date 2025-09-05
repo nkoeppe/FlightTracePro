@@ -4053,7 +4053,7 @@ INDEX_HTML = """
               liveTrackData.set(callsign, unique);
               
               // Create/update track visualization
-              if (liveMap2D && unique.length > 1) {
+              if (liveMap2D && liveMap2D.map && unique.length > 1) {
                 const positions = unique
                   .filter(p => p.pos && Array.isArray(p.pos) && p.pos.length === 2 &&
                           isFiniteNum(p.pos[0]) && isFiniteNum(p.pos[1]) &&
@@ -4289,7 +4289,7 @@ INDEX_HTML = """
         lastUpdateTime.set(cs, now);
         
         // Ensure live map is initialized
-        if (!liveMap2D) {
+        if (!liveMap2D || !liveMap2D.map) {
           ensureLiveMap().then(() => updateLivePosition(sample));
           return;
         }
@@ -4668,7 +4668,7 @@ INDEX_HTML = """
         }
         
         // Ensure live map is initialized
-        if (!liveMap2D) {
+        if (!liveMap2D || !liveMap2D.map) {
           ensureLiveMap().then(() => renderActual2DPositionSimple(cs, pos));
           return;
         }
