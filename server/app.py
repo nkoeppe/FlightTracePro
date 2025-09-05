@@ -2227,10 +2227,10 @@ INDEX_HTML = """
         
         // Initialize maps when switching
         if (!isConv) {
-          ensureLiveMap().then(() => setTimeout(() => liveMap && liveMap.invalidateSize(), 50));
+          ensureLiveMap().then(() => setTimeout(() => liveMap2D && liveMap2D.invalidateSize(), 50));
         }
         if (isConv) {
-          ensureMap().then(() => setTimeout(() => map && map.invalidateSize(), 50));
+          ensureMap().then(() => setTimeout(() => converterMap2D && converterMap2D.invalidateSize(), 50));
         }
       }
       
@@ -2562,10 +2562,8 @@ INDEX_HTML = """
         interactionTimeout = setTimeout(resetUserInteraction, 3000); // Reset after 3 seconds
       }
 
-      // Quick preview using Leaflet (2D)
-      let map, trackLayer, wptLayer;
-      // Overlay layers (2D)
-      let planLayer, airspaceLayer, airportLayer;
+      // Converter map using reusable component
+      let converterMap2D = null;
       let globeViewer, globeTracks = [], globeHandler, globeFlyTimer, globePositions = [], gliderEnt = null;
       // Overlay layers (3D)
       let plan3D = [], airspace3D = [], airport3D = [];
@@ -2852,57 +2850,29 @@ INDEX_HTML = """
       }
       
       function ensureMap() {
-        if (map) return Promise.resolve();
-        if (leafletReady) return leafletReady;
-        // Load Leaflet lazily and wait until the map is fully ready and sized
-        leafletReady = new Promise((resolve, reject) => {
-          const css = document.createElement('link');
-          css.rel = 'stylesheet';
-          css.href = 'https://unpkg.com/leaflet@1.9.4/dist/leaflet.css';
-          document.head.appendChild(css);
-          const script = document.createElement('script');
-          script.src = 'https://unpkg.com/leaflet@1.9.4/dist/leaflet.js';
-          script.crossOrigin = 'anonymous';
-          script.onload = () => {
-            try {
-              map = L.map('map', { preferCanvas: true, zoomAnimation: false, fadeAnimation: false, markerZoomAnimation: false, inertia: false }).setView([46.8, 8.2], 8);
-              L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { attribution: '© OpenStreetMap' }).addTo(map);
-              trackLayer = L.layerGroup().addTo(map);
-              wptLayer = L.layerGroup().addTo(map);
-              planLayer = L.layerGroup().addTo(map);
-              airspaceLayer = L.layerGroup().addTo(map);
-              airportLayer = L.layerGroup().addTo(map);
-              try { canvasRenderer = L.canvas({ padding: 0.5 }); } catch(_) {}
-
-              // Interaction detection for follow mode
-              map.on('movestart', markUserInteraction);
-              map.on('zoomstart', markUserInteraction);
-              map.on('drag', markUserInteraction);
-
-              // Wait until Leaflet reports ready and container is sized
-              map.whenReady(async () => {
-                const mapEl = document.getElementById('map');
-                let tries = 0;
-                while (tries < 30) {
-                  try {
-                    const rect = mapEl.getBoundingClientRect();
-                    const size = map.getSize();
-                    if (rect.width > 0 && rect.height > 0 && size.x > 0 && size.y > 0) break;
-                  } catch(_) {}
-                  await new Promise(r => setTimeout(r, 16));
-                  tries++;
-                }
-                try { map.invalidateSize(true); } catch(_) {}
-                resolve();
-              });
-            } catch (e) {
-              reject(e);
-            }
-          };
-          script.onerror = reject;
-          document.head.appendChild(script);
+        if (converterMap2D) return Promise.resolve();
+        
+        converterMap2D = new Map2D('map', {
+          enableFollowing: false,
+          enableInteractionDetection: true
         });
-        return leafletReady;
+        
+        // Legacy compatibility globals
+        const ensurePromise = converterMap2D.ensure().then(() => {
+          window.map = converterMap2D.map;
+          window.trackLayer = converterMap2D.getLayer('tracks');
+          window.wptLayer = converterMap2D.getLayer('waypoints');  
+          window.planLayer = converterMap2D.getLayer('plans');
+          window.airspaceLayer = converterMap2D.getLayer('airspaces');
+          window.airportLayer = converterMap2D.getLayer('airports');
+          
+          // Interaction detection for follow mode
+          converterMap2D.map.on('movestart', markUserInteraction);
+          converterMap2D.map.on('zoomstart', markUserInteraction);
+          converterMap2D.map.on('drag', markUserInteraction);
+        });
+        
+        return ensurePromise;
       }
 
       // Reusable 3D Globe Component
@@ -3278,7 +3248,7 @@ INDEX_HTML = """
         if (which === '2d') {
           tab2d.classList.add('active'); tab3d.classList.remove('active');
           mapDiv.classList.add('active'); globeDiv.classList.remove('active');
-          ensureMap().then(() => setTimeout(() => map && map.invalidateSize(), 50));
+          ensureMap().then(() => setTimeout(() => converterMap2D && converterMap2D.invalidateSize(), 50));
         } else {
           tab3d.classList.add('active'); tab2d.classList.remove('active');
           globeDiv.classList.add('active'); mapDiv.classList.remove('active');
@@ -3325,58 +3295,293 @@ INDEX_HTML = """
       // Helper function for coordinate validation
       const isFiniteNum = (n) => typeof n === 'number' && Number.isFinite(n);
 
-      // Live map variables
-      let liveMap = null, liveLeafletReady = null;
-      let liveMarkers = new Map(); // callsign -> marker
-      let livePaths = new Map();   // callsign -> L.polyline
-      let liveHoverPaths = new Map(); // callsign -> hover L.polyline for awesome track tooltips
-      let liveTrackData = new Map(); // callsign -> array of {pos, data, timestamp}
+      // Reusable 2D Map Component Class
+      class Map2D {
+        constructor(containerId, options = {}) {
+          this.containerId = containerId;
+          this.map = null;
+          this.leafletReady = null;
+          this.markers = new Map();
+          this.paths = new Map();
+          this.hoverPaths = new Map();
+          this.trackData = new Map();
+          this.layers = new Map();
+          this.options = {
+            initialView: [46.8, 8.2],
+            initialZoom: 8,
+            enableFollowing: false,
+            enableInteractionDetection: true,
+            ...options
+          };
+          this.followState = {
+            enabled: false,
+            target: null,
+            userInteraction: false
+          };
+        }
+
+        async ensure() {
+          if (this.map) return Promise.resolve();
+          if (this.leafletReady) return this.leafletReady;
+          
+          this.leafletReady = new Promise((resolve, reject) => {
+            const css = document.createElement('link');
+            css.rel = 'stylesheet';
+            css.href = 'https://unpkg.com/leaflet@1.9.4/dist/leaflet.css';
+            document.head.appendChild(css);
+            
+            const script = document.createElement('script');
+            script.src = 'https://unpkg.com/leaflet@1.9.4/dist/leaflet.js';
+            script.crossOrigin = 'anonymous';
+            
+            script.onload = () => {
+              try {
+                this.map = L.map(this.containerId, {
+                  preferCanvas: true,
+                  zoomAnimation: false,
+                  fadeAnimation: false,
+                  markerZoomAnimation: false,
+                  inertia: false
+                }).setView(this.options.initialView, this.options.initialZoom);
+                
+                L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+                  attribution: '© OpenStreetMap'
+                }).addTo(this.map);
+
+                // Create basic layers
+                this.layers.set('tracks', L.layerGroup().addTo(this.map));
+                this.layers.set('waypoints', L.layerGroup().addTo(this.map));
+                this.layers.set('plans', L.layerGroup().addTo(this.map));
+                this.layers.set('airspaces', L.layerGroup().addTo(this.map));
+                this.layers.set('airports', L.layerGroup().addTo(this.map));
+
+                if (this.options.enableInteractionDetection) {
+                  this.setupInteractionDetection();
+                }
+
+                resolve();
+              } catch(e) {
+                reject(e);
+              }
+            };
+            
+            script.onerror = reject;
+            document.head.appendChild(script);
+          });
+          
+          return this.leafletReady;
+        }
+
+        setupInteractionDetection() {
+          let userDragDetected = false;
+          
+          this.map.on('dragstart', () => {
+            userDragDetected = true;
+          });
+          
+          this.map.on('movestart', () => {
+            if (this.followState.enabled && userDragDetected) {
+              this.followState.enabled = false;
+              this.followState.userInteraction = true;
+              this.onFollowDisabled && this.onFollowDisabled();
+            }
+          });
+          
+          this.map.on('moveend', () => {
+            userDragDetected = false;
+          });
+
+          this.map.on('zoomstart', () => {
+            this.followState.userInteraction = true;
+          });
+        }
+
+        addMarker(id, pos, options = {}) {
+          const icon = L.icon({
+            iconUrl: options.iconUrl || '/static/icons/aircraft.svg',
+            iconSize: options.iconSize || [40, 40],
+            iconAnchor: options.iconAnchor || [20, 20]
+          });
+
+          const marker = L.marker(pos, { icon }).addTo(this.map);
+          
+          if (options.tooltip) {
+            marker.bindTooltip(options.tooltip, {
+              maxWidth: 320,
+              className: 'aircraft-tooltip',
+              direction: 'top',
+              offset: [0, -20]
+            });
+          }
+
+          this.markers.set(id, marker);
+          return marker;
+        }
+
+        updateMarker(id, pos, options = {}) {
+          const marker = this.markers.get(id);
+          if (marker) {
+            marker.setLatLng(pos);
+            if (options.tooltip) {
+              marker.setTooltipContent(options.tooltip);
+            }
+          }
+          return marker;
+        }
+
+        addTrackPath(id, positions, options = {}) {
+          const color = options.color || '#3388ff';
+          
+          const pathLine = L.polyline(positions, {
+            color: color,
+            weight: 3,
+            opacity: 0.7,
+            bubblingMouseEvents: false
+          });
+          
+          pathLine.addTo(this.map);
+          
+          // Create invisible wider hover line
+          const hoverLine = L.polyline(positions, {
+            color: 'transparent',
+            weight: 15,
+            opacity: 0,
+            interactive: true,
+            bubblingMouseEvents: false
+          });
+          
+          hoverLine.addTo(this.map);
+          
+          if (options.onHover) {
+            hoverLine.on('mouseover', options.onHover);
+            hoverLine.on('mouseout', options.onMouseOut || (() => {}));
+          }
+          
+          if (options.onClick) {
+            hoverLine.on('click', options.onClick);
+          }
+
+          this.paths.set(id, pathLine);
+          this.hoverPaths.set(id, hoverLine);
+          
+          return { pathLine, hoverLine };
+        }
+
+        updateTrackPath(id, positions) {
+          const pathLine = this.paths.get(id);
+          const hoverLine = this.hoverPaths.get(id);
+          
+          if (pathLine) pathLine.setLatLngs(positions);
+          if (hoverLine) hoverLine.setLatLngs(positions);
+        }
+
+        removeMarker(id) {
+          const marker = this.markers.get(id);
+          if (marker) {
+            this.map.removeLayer(marker);
+            this.markers.delete(id);
+          }
+        }
+
+        removePath(id) {
+          const pathLine = this.paths.get(id);
+          const hoverLine = this.hoverPaths.get(id);
+          
+          if (pathLine) {
+            this.map.removeLayer(pathLine);
+            this.paths.delete(id);
+          }
+          if (hoverLine) {
+            this.map.removeLayer(hoverLine);
+            this.hoverPaths.delete(id);
+          }
+        }
+
+        clearAll() {
+          this.markers.forEach(marker => this.map.removeLayer(marker));
+          this.paths.forEach(path => this.map.removeLayer(path));
+          this.hoverPaths.forEach(path => this.map.removeLayer(path));
+          
+          this.markers.clear();
+          this.paths.clear();
+          this.hoverPaths.clear();
+          this.trackData.clear();
+        }
+
+        fitBounds(bounds) {
+          if (bounds && bounds.length > 0) {
+            this.map.fitBounds(L.latLngBounds(bounds));
+          }
+        }
+
+        centerOnMarkers() {
+          if (this.markers.size > 0) {
+            const positions = Array.from(this.markers.values()).map(m => m.getLatLng());
+            this.fitBounds(positions);
+          }
+        }
+
+        flyTo(pos, zoom, options = {}) {
+          this.map.flyTo(pos, zoom || this.map.getZoom(), { animate: true, duration: 0.6, ...options });
+        }
+
+        setView(pos, zoom) {
+          this.map.setView(pos, zoom || this.map.getZoom());
+        }
+
+        invalidateSize() {
+          if (this.map) {
+            this.map.invalidateSize();
+          }
+        }
+
+        getLayer(name) {
+          return this.layers.get(name);
+        }
+
+        distance(pos1, pos2) {
+          return this.map.distance(pos1, pos2);
+        }
+
+        getZoom() {
+          return this.map.getZoom();
+        }
+      }
+
+      // Live map instance
+      let liveMap2D = null;
+      let liveMarkers = new Map(); // Legacy compatibility 
+      let livePaths = new Map();   
+      let liveHoverPaths = new Map();
+      let liveTrackData = new Map();
       
       function ensureLiveMap() {
-        if (liveMap) return Promise.resolve();
-        if (liveLeafletReady) return liveLeafletReady;
-        liveLeafletReady = new Promise((resolve, reject) => {
-          const css = document.createElement('link');
-          css.rel = 'stylesheet';
-          css.href = 'https://unpkg.com/leaflet@1.9.4/dist/leaflet.css';
-          document.head.appendChild(css);
-          const script = document.createElement('script');
-          script.src = 'https://unpkg.com/leaflet@1.9.4/dist/leaflet.js';
-          script.crossOrigin = 'anonymous';
-          script.onload = () => {
-            liveMap = L.map('livemap').setView([46.8, 8.2], 8);
-            L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
-              attribution: '© OpenStreetMap'
-            }).addTo(liveMap);
-            
-            // Add interaction detection for live map follow mode
-            let userDragDetected = false;
-            
-            liveMap.on('dragstart', () => {
-              userDragDetected = true;
-            });
-            
-            liveMap.on('movestart', () => {
-              // Only disable following if user manually moved (not programmatic)
-              if (liveFollow2D && userDragDetected) {
-                liveFollow2D = false;
-                updateFollowBtn();
-                pushEvent('Following disabled - manual map movement');
-              }
-            });
-            
-            // Remove zoom disable - zooming should zoom into the followed aircraft
-            
-            liveMap.on('moveend', () => {
-              userDragDetected = false;
-            });
-            
-            resolve();
-          };
-          script.onerror = reject;
-          document.head.appendChild(script);
+        if (liveMap2D) return Promise.resolve();
+        
+        liveMap2D = new Map2D('livemap', {
+          enableFollowing: true,
+          enableInteractionDetection: true
         });
-        return liveLeafletReady;
+        
+        liveMap2D.onFollowDisabled = () => {
+          liveFollow2D = false;
+          updateFollowBtn();
+          pushEvent('Following disabled - manual map movement');
+        };
+        
+        // Create legacy compatibility references
+        const ensurePromise = liveMap2D.ensure().then(() => {
+          // Legacy compatibility - map global reference
+          window.liveMap = liveMap2D.map;
+          
+          // Set up legacy compatibility references
+          liveMarkers = liveMap2D.markers;
+          livePaths = liveMap2D.paths;
+          liveHoverPaths = liveMap2D.hoverPaths;
+          liveTrackData = liveMap2D.trackData;
+        });
+        
+        return ensurePromise;
       }
 
       // Live 3D Globe
@@ -3454,8 +3659,8 @@ INDEX_HTML = """
                   if (m) {
                     try {
                       const ll = m.getLatLng();
-                      const targetZ = Math.max(12, liveMap.getZoom());
-                      liveMap.flyTo(ll, targetZ, { animate: true, duration: 0.6 });
+                      const targetZ = Math.max(12, liveMap2D.getZoom());
+                      liveMap2D.flyTo(ll, targetZ, { animate: true, duration: 0.6 });
                     } catch(_) {}
                   }
                 } else if (live3DActive) {
@@ -3523,7 +3728,7 @@ INDEX_HTML = """
         liveGlobeDiv.classList.toggle('active', !is2D);
         
         if (is2D) {
-          ensureLiveMap().then(() => setTimeout(() => liveMap && liveMap.invalidateSize(), 50));
+          ensureLiveMap().then(() => setTimeout(() => liveMap2D && liveMap2D.invalidateSize(), 50));
         } else {
           ensureLiveGlobe(() => setTimeout(() => liveGlobe && liveGlobe.resize(), 50));
         }
@@ -3718,9 +3923,8 @@ INDEX_HTML = """
       // Clear all map data (aircraft, tracks, UI)
       function clearMapData() {
         // Clear 2D map data
-        if (liveMap) {
-          liveMarkers.forEach(marker => liveMap.removeLayer(marker));
-          livePaths.forEach(path => liveMap.removeLayer(path));
+        if (liveMap2D) {
+          liveMap2D.clearAll();
         }
         
         // Clear 3D globe data using Globe3D component
@@ -3849,7 +4053,7 @@ INDEX_HTML = """
               liveTrackData.set(callsign, unique);
               
               // Create/update track visualization
-              if (liveMap && unique.length > 1) {
+              if (liveMap2D && unique.length > 1) {
                 const positions = unique
                   .filter(p => p.pos && Array.isArray(p.pos) && p.pos.length === 2 &&
                           isFiniteNum(p.pos[0]) && isFiniteNum(p.pos[1]) &&
@@ -4630,16 +4834,15 @@ INDEX_HTML = """
       liveConnectBtn.addEventListener('click', () => {
         ensureLiveMap().then(() => {
           connectWs();
-          setTimeout(() => liveMap && liveMap.invalidateSize(), 100);
+          setTimeout(() => liveMap2D && liveMap2D.invalidateSize(), 100);
         });
       });
       
       liveDisconnectBtn.addEventListener('click', disconnectWs);
       
       liveCenterBtn.addEventListener('click', () => {
-        if (liveMarkers.size > 0) {
-          const positions = Array.from(liveMarkers.values()).map(m => m.getLatLng());
-          liveMap.fitBounds(L.latLngBounds(positions));
+        if (liveMap2D) {
+          liveMap2D.centerOnMarkers();
         }
       });
 
