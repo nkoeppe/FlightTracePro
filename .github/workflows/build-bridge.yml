@@ -24,7 +24,7 @@ jobs:
 
       - name: Build EXE
         run: |
-          pyinstaller --clean --noconsole --onefile --name FlightTracePro client\msfs_bridge_gui.pyw --specpath client
+          pyinstaller --clean client\FlightTracePro.spec
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4

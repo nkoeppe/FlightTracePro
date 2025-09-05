@@ -52,9 +52,24 @@ python client/msfs_bridge_gui.pyw
 
 ### Build Windows EXE
 ```bash
-# From project root
-pyinstaller --noconsole --name FlightTraceProBridge --onefile --icon NONE client/msfs_bridge_gui.pyw
+# Recommended: Use the improved build scripts
+cd client
+./build_exe.bat        # Windows batch file
+# OR
+./build_exe.ps1        # PowerShell script (better error handling)
+
+# Manual build using spec file (from project root)
+pyinstaller --clean client/FlightTracePro.spec
+
+# Legacy manual build (less reliable)
+pyinstaller --noconsole --name FlightTracePro --onefile client/msfs_bridge_gui.pyw
 ```
+
+**Important Notes:**
+- The new build scripts use a proper `.spec` file for better DLL handling
+- This fixes the "python321.dll not found" error in auto-updates
+- The auto-updater now has robust error handling and backup/restore functionality
+- Built executables include version checking (`--version` flag) for update verification
 
 ## Architecture Overview
 

@@ -2372,6 +2372,8 @@ INDEX_HTML = """
         try {
           const text = await file.text();
           const { tracks, waypoints } = parseGpx(text);
+          // Begin loading the globe in background immediately
+          ensureGlobe(() => { try { converterGlobe && converterGlobe.resize(); } catch(_) {} });
           lastFileBlob = file;
           // Populate track selector
           const prevSel = preserveSelection ? trackSelect.value : 'auto';
@@ -2430,7 +2432,9 @@ INDEX_HTML = """
             try {
               const clean = (latlngs || []).filter(ll => Array.isArray(ll) && isValidLL(ll[0], ll[1]));
               if (clean.length < 2) return null;
-              const pl = L.polyline(clean, opts);
+              const baseOpts = { interactive: false };
+              if (canvasRenderer) baseOpts.renderer = canvasRenderer;
+              const pl = L.polyline(clean, Object.assign(baseOpts, opts || {}));
               trackLayer.addLayer(pl);
               return pl;
             } catch (e) {
@@ -2485,15 +2489,20 @@ INDEX_HTML = """
                 return `rgb(${r},${g},${b})`;
               };
               chosen.legs.forEach(({a,b,speed}) => {
-                const pl = safeAddPolyline([[a.lat,a.lon],[b.lat,b.lon]], { color: speedColor(speed), weight: width });
-                if (pl) group.push(pl);
+                // Validate leg endpoints before using them
+                if (a && b && isValidLL(a.lat, a.lon) && isValidLL(b.lat, b.lon)) {
+                  const pl = safeAddPolyline([[a.lat,a.lon],[b.lat,b.lon]], { color: speedColor(speed), weight: width });
+                  if (pl) group.push(pl);
+                }
               });
             } else {
               chosen.segments.forEach(seg => {
-                if (seg.length > 1) {
-                  const latlngs = seg.map(p => [p.lat, p.lon]);
-                  const pl = safeAddPolyline(latlngs, { color, weight: width });
-                  if (pl) group.push(pl);
+                if (seg && seg.length > 1) {
+                  const latlngs = seg.filter(p => p && isValidLL(p.lat, p.lon)).map(p => [p.lat, p.lon]);
+                  if (latlngs.length > 1) {
+                    const pl = safeAddPolyline(latlngs, { color, weight: width });
+                    if (pl) group.push(pl);
+                  }
                 }
               });
             }
@@ -2505,54 +2514,32 @@ INDEX_HTML = """
             });
           }
           // No extra fitBounds here; we already fitted using raw points above with animate:false
-          // Draw 3D
-          ensureGlobe(() => {
+          // Draw 3D using reusable Globe3D component
+          ensureGlobe(async () => {
             try {
-              // Clear previous 3D tracks
-              if (globeTracks && globeTracks.length) {
-                globeTracks.forEach(ent => { try { globeViewer.entities.remove(ent); } catch(_) {} });
-                globeTracks = [];
-              }
               let longestSeg = [];
-              const C = Cesium;
-              const toColor = (c) => C.Color.fromCssColorString(c);
+              
               if (colorBy === 'speed' && chosen.legs && chosen.legs.length) {
-                const speeds = chosen.legs.map(l => l.speed).filter(s => s !== null);
-                const smin = speeds.length ? Math.min(...speeds) : 0;
-                const smax = speeds.length ? Math.max(...speeds) : 1;
-                const lerp = (a,b,t) => a + (b-a)*t;
-                const speedColor = (s) => {
-                  if (s === null) return color;
-                  const t = (s - smin) / Math.max(1e-6, (smax - smin));
-                  const r = Math.round(lerp(0,255,t));
-                  const g = Math.round(lerp(114,0,t));
-                  const b = Math.round(lerp(255,0,t));
-                  return `rgb(${r},${g},${b})`;
-                };
-                chosen.legs.forEach(({a,b,speed}) => {
-                  const positions = [C.Cartesian3.fromDegrees(a.lon,a.lat,a.ele||0), C.Cartesian3.fromDegrees(b.lon,b.lat,b.ele||0)];
-                  const ent = globeViewer.entities.add({ polyline: { positions, width: width, material: toColor(speedColor(speed)), clampToGround: false } });
-                  globeTracks.push(ent);
-                });
+                // For speed coloring, we'll use the default color for now
+                // TODO: Add multi-color track support to Globe3D
+                await converterGlobe.addTrackSegments(chosen.segments || [], color, width);
                 longestSeg = (chosen.segments && chosen.segments[0]) ? chosen.segments[0] : [];
               } else {
+                await converterGlobe.addTrackSegments(chosen.segments || [], color, width);
                 (chosen.segments||[]).forEach(seg => {
-                  if (seg.length > 1) {
-                    const positions = seg.map(p => C.Cartesian3.fromDegrees(p.lon,p.lat,p.ele||0));
-                    const ent = globeViewer.entities.add({ polyline: { positions, width: width, material: toColor(color), clampToGround: false } });
-                    globeTracks.push(ent);
-                    if (seg.length > longestSeg.length) longestSeg = seg;
-                  }
+                  if (seg.length > longestSeg.length) longestSeg = seg;
                 });
               }
-              // Prepare simple flythrough data and focus camera
+              
+              // Prepare simple flythrough data
               globePositions = longestSeg.map(p => ({lat:p.lat, lon:p.lon, ele:p.ele||0}));
-              try {
-                const ents = globeTracks.slice();
-                if (ents.length) globeViewer.flyTo(ents, { duration: 0.6 });
-              } catch(_) {}
               setupFlyUI();
-            } catch (e) { console.error('3D preview error:', e); }
+              
+              // Keep backward compatibility
+              globeTracks = converterGlobe.tracks;
+            } catch (e) { 
+              console.error('3D preview error:', e); 
+            }
           });
           statusEl.textContent = `Loaded ${tracks.reduce((n,t)=>n+t.segments.reduce((m,s)=>m+s.length,0),0)} points in ${tracks.length} tracks`;
         } catch (error) {
@@ -2616,6 +2603,7 @@ INDEX_HTML = """
       const mapDiv = document.getElementById('map');
       const globeDiv = document.getElementById('globe');
       let leafletReady = null;
+      let canvasRenderer = null;
       let cesiumReady = null;
       // Optional country lookup from static JSON (coarse bboxes)
       let countryIndex = null;
@@ -2796,30 +2784,29 @@ INDEX_HTML = """
         flyRange.value = String(flyIndex);
         if (!flySpeedInput.value) flySpeedInput.value = '1.5';
 
-        function posAt(i){ i = Math.max(0, Math.min(globePositions.length-1, i)); const p = globePositions[i]; return Cesium.Cartesian3.fromDegrees(p.lon,p.lat,p.ele||0); }
-
-        function ensureGlider(){
-          if (gliderEnt && !gliderEnt.isDestroyed) return gliderEnt;
-          const p0 = posAt(0);
-          gliderEnt = globeViewer.entities.add({
-            position: p0,
-            model: { uri: '/static/models/glider/Glider.glb', scale: 1.0, minimumPixelSize: 64, maximumScale: 100, runAnimations: false },
-            label: { text: 'Preview', font: '12pt sans-serif', pixelOffset: new Cesium.Cartesian2(0,-40), fillColor: Cesium.Color.YELLOW, outlineColor: Cesium.Color.BLACK, outlineWidth:2, style: Cesium.LabelStyle.FILL_AND_OUTLINE }
-          });
-          return gliderEnt;
+        function posAt(i) { 
+          i = Math.max(0, Math.min(globePositions.length-1, i)); 
+          return globePositions[i]; 
         }
 
-        function update3DView(){
-          const ent = ensureGlider();
-          const p = posAt(flyIndex);
-          ent.position = p;
-          if (followCam) {
-            try { globeViewer.trackedEntity = ent; } catch(_) {}
+        async function ensureGlider() {
+          if (!converterGlobe.entities.has('preview')) {
+            const p0 = posAt(0);
+            await converterGlobe.addAircraft('preview', p0, {}, 'Preview');
+            gliderEnt = converterGlobe.entities.get('preview');
           }
-          globeViewer.scene.requestRender();
+          return converterGlobe.entities.get('preview');
         }
 
-        function step(ts){
+        async function update3DView() {
+          const p = posAt(flyIndex);
+          await converterGlobe.updateAircraft('preview', p);
+          if (followCam) {
+            await converterGlobe.trackEntity('preview');
+          }
+        }
+
+        function step(ts) {
           if (!flyPlaying) return;
           const spd = Number(flySpeedInput.value) || 1.0;
           flyIndex += Math.max(1, Math.floor(spd));
@@ -2830,23 +2817,30 @@ INDEX_HTML = """
         }
 
         // Wire buttons
-        playBtn && playBtn.addEventListener('click', () => {
-          ensureGlider();
-          if (!followCam) { try { globeViewer.trackedEntity = gliderEnt; } catch(_) {} }
+        playBtn && playBtn.addEventListener('click', async () => {
+          await ensureGlider();
+          if (!followCam) { await converterGlobe.trackEntity('preview'); }
           if (!flyPlaying) { flyPlaying = true; cancelAnimationFrame(flyReq); flyReq = requestAnimationFrame(step); }
         });
         pauseBtn && pauseBtn.addEventListener('click', () => { flyPlaying = false; cancelAnimationFrame(flyReq); });
-        stopBtn && stopBtn.addEventListener('click', () => { flyPlaying = false; cancelAnimationFrame(flyReq); flyIndex = 0; flyRange.value = '0'; update3DView(); });
-        homeBtn && homeBtn.addEventListener('click', () => {
+        stopBtn && stopBtn.addEventListener('click', async () => { 
+          flyPlaying = false; 
+          cancelAnimationFrame(flyReq); 
+          flyIndex = 0; 
+          flyRange.value = '0'; 
+          await update3DView(); 
+        });
+        homeBtn && homeBtn.addEventListener('click', async () => {
           try { globeViewer.trackedEntity = undefined; } catch(_) {}
-          try {
-            // Fly to bounding sphere of current entities
-            const ents = globeTracks || [];
-            if (ents.length) globeViewer.flyTo(ents, { duration: 0.8 });
-          } catch(_) {}
+          await converterGlobe.flyToTracks();
         });
         followBtn && followBtn.addEventListener('click', () => { setFollowCam(!followCam); update3DView(); });
-        flyRange && flyRange.addEventListener('input', () => { flyIndex = Number(flyRange.value) || 0; flyPlaying = false; cancelAnimationFrame(flyReq); update3DView(); });
+        flyRange && flyRange.addEventListener('input', async () => { 
+          flyIndex = Number(flyRange.value) || 0; 
+          flyPlaying = false; 
+          cancelAnimationFrame(flyReq); 
+          await update3DView(); 
+        });
         camDistInput && camDistInput.addEventListener('change', () => { /* trackedEntity handles distance via mouse; keep for future */ });
 
         // Initial view
@@ -2867,13 +2861,14 @@ INDEX_HTML = """
           script.crossOrigin = 'anonymous';
           script.onload = () => {
             try {
-              map = L.map('map', { preferCanvas: true }).setView([46.8, 8.2], 8);
+              map = L.map('map', { preferCanvas: true, zoomAnimation: false, fadeAnimation: false, markerZoomAnimation: false, inertia: false }).setView([46.8, 8.2], 8);
               L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { attribution: '© OpenStreetMap' }).addTo(map);
               trackLayer = L.layerGroup().addTo(map);
               wptLayer = L.layerGroup().addTo(map);
               planLayer = L.layerGroup().addTo(map);
               airspaceLayer = L.layerGroup().addTo(map);
               airportLayer = L.layerGroup().addTo(map);
+              try { canvasRenderer = L.canvas({ padding: 0.5 }); } catch(_) {}
 
               // Interaction detection for follow mode
               map.on('movestart', markUserInteraction);
@@ -2906,58 +2901,372 @@ INDEX_HTML = """
         return leafletReady;
       }
 
-      // Load Cesium and initialize the preview globe
-      function ensureGlobe(cb) {
-        if (globeViewer) { cb && cb(); return Promise.resolve(); }
-        if (cesiumReady) { cesiumReady.then(() => cb && cb()); return cesiumReady; }
-        cesiumReady = new Promise((resolve, reject) => {
-          // CSS
-          const css = document.createElement('link');
-          css.rel = 'stylesheet';
-          css.href = 'https://unpkg.com/cesium/Build/Cesium/Widgets/widgets.css';
-          document.head.appendChild(css);
-          // Script
-          const script = document.createElement('script');
-          window.CESIUM_BASE_URL = 'https://unpkg.com/cesium/Build/Cesium/';
-          script.src = window.CESIUM_BASE_URL + 'Cesium.js';
-          script.crossOrigin = 'anonymous';
-          script.onload = () => {
-            try {
-              globeViewer = new Cesium.Viewer('globe', {
-                terrainProvider: new Cesium.EllipsoidTerrainProvider(),
-                animation: false, timeline: false, baseLayerPicker: false, geocoder: false, sceneModePicker: false,
-                infoBox: false, selectionIndicator: false, navigationHelpButton: false, fullscreenButton: false
-              });
-              globeViewer.scene.requestRenderMode = true;
-              globeViewer.scene.maximumRenderTimeChange = Infinity;
-              // Try Ion assets if token exists
-              (async () => {
-                try {
-                  const tok = (window.CESIUM_ION_TOKEN && window.CESIUM_ION_TOKEN !== '') ? window.CESIUM_ION_TOKEN : (localStorage.getItem('cesium_token') || '');
-                  if (tok) {
-                    Cesium.Ion.defaultAccessToken = tok;
-                    globeViewer.terrainProvider = await Cesium.createWorldTerrainAsync();
-                    const imagery = await Cesium.IonImageryProvider.fromAssetId(3);
-                    globeViewer.imageryLayers.removeAll();
-                    globeViewer.imageryLayers.addImageryProvider(imagery);
-                    try { const tiles = await Cesium.createOsmBuildingsAsync(); globeViewer.scene.primitives.add(tiles); } catch(_) {}
-                  } else {
-                    globeViewer.imageryLayers.removeAll();
-                    globeViewer.imageryLayers.addImageryProvider(new Cesium.OpenStreetMapImageryProvider({ url: 'https://tile.openstreetmap.org/' }));
-                    globeViewer.terrainProvider = new Cesium.EllipsoidTerrainProvider();
-                  }
-                } catch(_) {}
-                cb && cb();
-                resolve();
-              })();
-            } catch (e) {
-              reject(e);
-            }
+      // Reusable 3D Globe Component
+      class Globe3D {
+        constructor(containerId, options = {}) {
+          this.containerId = containerId;
+          this.viewer = null;
+          this.entities = new Map();
+          this.tracks = [];
+          this.ready = null;
+          this.options = {
+            enableFlythrough: false,
+            enableLiveTracking: false,
+            performanceMode: false,
+            ...options
           };
-          script.onerror = reject;
-          document.body.appendChild(script);
+        }
+
+        async initialize(callback) {
+          if (this.viewer) { 
+            callback && callback(this.viewer); 
+            return Promise.resolve(this.viewer); 
+          }
+          if (this.ready) { 
+            const viewer = await this.ready; 
+            callback && callback(viewer); 
+            return viewer; 
+          }
+          
+          this.ready = new Promise((resolve, reject) => {
+            // Load CSS
+            if (!document.querySelector('link[href*="cesium"]')) {
+              const css = document.createElement('link');
+              css.rel = 'stylesheet';
+              css.href = 'https://unpkg.com/cesium/Build/Cesium/Widgets/widgets.css';
+              document.head.appendChild(css);
+            }
+            
+            // Load Script
+            if (window.Cesium) {
+              this._createViewer().then(resolve).catch(reject);
+            } else {
+              const script = document.createElement('script');
+              window.CESIUM_BASE_URL = 'https://unpkg.com/cesium/Build/Cesium/';
+              script.src = window.CESIUM_BASE_URL + 'Cesium.js';
+              script.crossOrigin = 'anonymous';
+              script.onload = () => this._createViewer().then(resolve).catch(reject);
+              script.onerror = reject;
+              document.body.appendChild(script);
+            }
+          });
+          
+          const viewer = await this.ready;
+          callback && callback(viewer);
+          return viewer;
+        }
+
+        async _createViewer() {
+          try {
+            const C = Cesium;
+            this.viewer = new C.Viewer(this.containerId, {
+              terrainProvider: new C.EllipsoidTerrainProvider(),
+              animation: false,
+              timeline: false,
+              baseLayerPicker: false,
+              geocoder: false,
+              sceneModePicker: false,
+              infoBox: false,
+              selectionIndicator: false,
+              navigationHelpButton: false,
+              fullscreenButton: false,
+              shouldAnimate: !this.options.performanceMode
+            });
+
+            // Performance optimizations
+            this.viewer.scene.requestRenderMode = true;
+            this.viewer.scene.maximumRenderTimeChange = this.options.performanceMode ? 1.0 : Infinity;
+            
+            if (this.options.performanceMode) {
+              this.viewer.scene.fog.enabled = false;
+              this.viewer.scene.skyAtmosphere.show = false;
+              this.viewer.scene.globe.tileCacheSize = 100;
+              this.viewer.scene.globe.enableLighting = false;
+              this.viewer.scene.postProcessStages.fxaa.enabled = false;
+            }
+            
+            this.viewer.cesiumWidget.creditContainer.style.display = 'none';
+
+            // Setup terrain and imagery
+            await this._setupTerrain();
+            
+            return this.viewer;
+          } catch (e) {
+            throw e;
+          }
+        }
+
+        async _setupTerrain() {
+          try {
+            const C = Cesium;
+            const tok = (window.CESIUM_ION_TOKEN && window.CESIUM_ION_TOKEN !== '') ? 
+                       window.CESIUM_ION_TOKEN : 
+                       (localStorage.getItem('cesium_token') || '');
+            
+            if (tok) {
+              C.Ion.defaultAccessToken = tok;
+              this.viewer.terrainProvider = await C.createWorldTerrainAsync();
+              const imagery = await C.IonImageryProvider.fromAssetId(3);
+              this.viewer.imageryLayers.removeAll();
+              this.viewer.imageryLayers.addImageryProvider(imagery);
+              try { 
+                const tiles = await C.createOsmBuildingsAsync(); 
+                this.viewer.scene.primitives.add(tiles); 
+              } catch(_) {}
+            } else {
+              this.viewer.imageryLayers.removeAll();
+              this.viewer.imageryLayers.addImageryProvider(
+                new C.OpenStreetMapImageryProvider({ url: 'https://tile.openstreetmap.org/' })
+              );
+              this.viewer.terrainProvider = new C.EllipsoidTerrainProvider();
+            }
+          } catch(_) {}
+        }
+
+        async addTrackSegments(segments, color = '#FF0000', width = 3) {
+          await this.initialize();
+          const C = Cesium;
+          
+          // Clear existing tracks
+          this.clearTracks();
+          
+          segments.forEach(segment => {
+            if (segment.length > 1) {
+              const positions = segment.map(p => C.Cartesian3.fromDegrees(p.lon, p.lat, p.ele || 0));
+              const entity = this.viewer.entities.add({
+                polyline: {
+                  positions,
+                  width,
+                  material: C.Color.fromCssColorString(color),
+                  clampToGround: false
+                }
+              });
+              this.tracks.push(entity);
+            }
+          });
+
+          if (this.tracks.length) {
+            this.viewer.flyTo(this.tracks, { duration: 0.6 });
+          }
+        }
+
+        async addAircraft(callsign, position, orientation = {}, label = '') {
+          await this.initialize();
+          const C = Cesium;
+          
+          const pos = C.Cartesian3.fromDegrees(position.lon, position.lat, position.alt || 0);
+          const entity = this.viewer.entities.add({
+            id: callsign,
+            name: callsign,
+            position: pos,
+            orientation: C.Transforms.headingPitchRollQuaternion(
+              pos,
+              C.HeadingPitchRoll.fromDegrees(
+                orientation.hdg || 0, 
+                orientation.pitch || 0, 
+                orientation.roll || 0
+              )
+            ),
+            model: {
+              uri: '/static/models/glider/Glider.glb',
+              scale: 1.0,
+              minimumPixelSize: 64,
+              maximumScale: 100,
+              runAnimations: false
+            },
+            label: {
+              text: label || callsign,
+              font: '12pt sans-serif',
+              pixelOffset: new C.Cartesian2(0, -60),
+              fillColor: C.Color.YELLOW,
+              outlineColor: C.Color.BLACK,
+              outlineWidth: 2,
+              style: C.LabelStyle.FILL_AND_OUTLINE,
+              horizontalOrigin: C.HorizontalOrigin.CENTER,
+              verticalOrigin: C.VerticalOrigin.BOTTOM,
+              show: true
+            }
+          });
+          
+          this.entities.set(callsign, entity);
+          
+          // Add dynamic flight trail for live tracking
+          if (this.options.enableLiveTracking) {
+            this._initFlightTrail(callsign, pos);
+          }
+          
+          return entity;
+        }
+
+        _initFlightTrail(callsign, initialPos) {
+          const C = Cesium;
+          
+          // Store trail points
+          if (!this.trailData) this.trailData = new Map();
+          this.trailData.set(callsign, [initialPos]);
+          
+          // Create trail polyline with dynamic positions
+          const trailEntity = this.viewer.entities.add({
+            id: callsign + '_trail',
+            name: callsign + ' Flight Trail',
+            polyline: {
+              positions: new C.CallbackProperty(() => {
+                const points = this.trailData.get(callsign) || [];
+                return points.slice(); // Return copy for performance
+              }, false),
+              width: 3,
+              material: this._getCallsignColor(callsign),
+              clampToGround: false,
+              followSurface: false,
+              arcType: C.ArcType.NONE,
+              granularity: C.Math.RADIANS_PER_DEGREE,
+              show: true
+            }
+          });
+          
+          // Store trail reference
+          if (!this.trails) this.trails = new Map();
+          this.trails.set(callsign, trailEntity);
+        }
+
+        _getCallsignColor(callsign) {
+          // Use the same color function as the existing app if available
+          if (typeof getCallsignColor !== 'undefined') {
+            return Cesium.Color.fromCssColorString(getCallsignColor(callsign));
+          }
+          // Fallback color scheme
+          const colors = ['#FF6B6B', '#4ECDC4', '#45B7D1', '#96CEB4', '#FFEAA7'];
+          const hash = callsign.split('').reduce((a, b) => a + b.charCodeAt(0), 0);
+          return Cesium.Color.fromCssColorString(colors[hash % colors.length]);
+        }
+
+        async updateAircraft(callsign, position, orientation = {}) {
+          const entity = this.entities.get(callsign);
+          if (!entity) return;
+          
+          const C = Cesium;
+          const pos = C.Cartesian3.fromDegrees(position.lon, position.lat, position.alt || 0);
+          entity.position = pos;
+          entity.orientation = C.Transforms.headingPitchRollQuaternion(
+            pos,
+            C.HeadingPitchRoll.fromDegrees(
+              orientation.hdg || 0, 
+              orientation.pitch || 0, 
+              orientation.roll || 0
+            )
+          );
+          
+          // Update flight trail for live tracking
+          if (this.options.enableLiveTracking && this.trailData) {
+            const trail = this.trailData.get(callsign);
+            if (trail) {
+              trail.push(pos);
+              // Keep only last 500 points for performance
+              if (trail.length > 500) {
+                trail.shift();
+              }
+            }
+          }
+          
+          this.viewer.scene.requestRender();
+        }
+
+        async trackEntity(callsign) {
+          const entity = this.entities.get(callsign);
+          if (entity && this.viewer) {
+            this.viewer.trackedEntity = entity;
+          }
+        }
+
+        async flyToEntity(callsign, duration = 0.8) {
+          const entity = this.entities.get(callsign);
+          if (entity && this.viewer) {
+            this.viewer.flyTo(entity, { duration });
+          }
+        }
+
+        async flyToTracks(duration = 0.8) {
+          if (this.tracks.length && this.viewer) {
+            this.viewer.flyTo(this.tracks, { duration });
+          }
+        }
+
+        clearTracks() {
+          this.tracks.forEach(track => {
+            try { this.viewer.entities.remove(track); } catch(_) {}
+          });
+          this.tracks = [];
+        }
+
+        clearAircraft() {
+          this.entities.forEach(entity => {
+            try { this.viewer.entities.remove(entity); } catch(_) {}
+          });
+          this.entities.clear();
+          
+          // Clear trails
+          if (this.trails) {
+            this.trails.forEach(trail => {
+              try { this.viewer.entities.remove(trail); } catch(_) {}
+            });
+            this.trails.clear();
+          }
+          
+          // Clear trail data
+          if (this.trailData) {
+            this.trailData.clear();
+          }
+        }
+
+        clearAll() {
+          this.clearTracks();
+          this.clearAircraft();
+        }
+
+        resize() {
+          if (this.viewer) {
+            this.viewer.resize();
+          }
+        }
+
+        destroy() {
+          if (this.viewer) {
+            this.viewer.destroy();
+            this.viewer = null;
+          }
+          this.entities.clear();
+          this.tracks = [];
+          this.ready = null;
+        }
+      }
+
+      // Create global instances
+      let converterGlobe = null;
+      let liveGlobe = null;
+
+      // Legacy wrapper for converter
+      function ensureGlobe(cb) {
+        if (!converterGlobe) {
+          converterGlobe = new Globe3D('globe', { enableFlythrough: true });
+        }
+        return converterGlobe.initialize((viewer) => {
+          globeViewer = viewer; // Keep legacy reference
+          cb && cb();
         });
-        return cesiumReady;
+      }
+
+      // Legacy wrapper for live tracking  
+      function ensureLiveGlobe(cb) {
+        if (!liveGlobe) {
+          liveGlobe = new Globe3D('liveglobe', { 
+            enableLiveTracking: true, 
+            performanceMode: true 
+          });
+        }
+        return liveGlobe.initialize((viewer) => {
+          liveGlobeViewer = viewer; // Keep legacy reference
+          cb && cb();
+        });
       }
 
       // Tab switching for converter preview (2D/3D)
@@ -2969,12 +3278,17 @@ INDEX_HTML = """
         } else {
           tab3d.classList.add('active'); tab2d.classList.remove('active');
           globeDiv.classList.add('active'); mapDiv.classList.remove('active');
-          ensureGlobe(() => setTimeout(() => globeViewer && globeViewer.resize(), 50));
+          ensureGlobe(() => setTimeout(() => converterGlobe && converterGlobe.resize(), 50));
         }
       }
       tab2d && tab2d.addEventListener('click', () => setTab('2d'));
       tab3d && tab3d.addEventListener('click', () => setTab('3d'));
-      window.addEventListener('resize', () => { try { if (map) map.invalidateSize(); if (globeViewer) globeViewer.resize(); } catch(_) {} });
+      window.addEventListener('resize', () => { 
+        try { 
+          if (map) map.invalidateSize(); 
+          if (converterGlobe) converterGlobe.resize(); 
+        } catch(_) {} 
+      });
 
       // Live tracking variables
       const liveChInput = document.getElementById('live_channel');
@@ -3066,161 +3380,7 @@ INDEX_HTML = """
       let live3DDebugAxes = new Map(); // callsign -> debug axes entities
       let live3DLastLL = new Map();   // callsign -> {lat,lon}
       
-      function ensureLiveGlobe(cb) {
-        if (liveGlobeViewer) { 
-          cb && cb(); 
-          return Promise.resolve(); 
-        }
-        
-        return new Promise((resolve, reject) => {
-          const css = document.createElement('link'); 
-          css.rel='stylesheet'; 
-          css.href='https://unpkg.com/cesium/Build/Cesium/Widgets/widgets.css'; 
-          document.head.appendChild(css);
-          
-          const script = document.createElement('script'); 
-          window.CESIUM_BASE_URL = 'https://unpkg.com/cesium/Build/Cesium/'; 
-          script.src = window.CESIUM_BASE_URL + 'Cesium.js'; 
-          script.crossOrigin = 'anonymous';
-          
-          script.onload = () => {
-            try {
-              const C = Cesium;
-              if (window.CESIUM_ION_TOKEN) {
-                C.Ion.defaultAccessToken = window.CESIUM_ION_TOKEN;
-              }
-              
-              // Start with basic ellipsoid terrain - we'll add real terrain switching later
-              console.log('Creating Cesium viewer...');
-              liveGlobeViewer = new C.Viewer('liveglobe', {
-                animation: false,
-                timeline: false,
-                baseLayerPicker: false,
-                geocoder: false,
-                sceneModePicker: false,
-                infoBox: false,
-                selectionIndicator: false,
-                navigationHelpButton: false,
-                fullscreenButton: false,
-                shouldAnimate: false
-              });
-              
-              console.log('Cesium viewer created successfully:', liveGlobeViewer);
-              
-              // Performance optimizations
-              liveGlobeViewer.scene.requestRenderMode = true;
-              liveGlobeViewer.scene.maximumRenderTimeChange = 1.0;
-              liveGlobeViewer.scene.fog.enabled = false;
-              liveGlobeViewer.scene.skyAtmosphere.show = false;
-              liveGlobeViewer.scene.globe.tileCacheSize = 100;
-              liveGlobeViewer.scene.globe.enableLighting = false;
-              liveGlobeViewer.cesiumWidget.creditContainer.style.display = 'none';
-              
-              // Disable expensive visual effects
-              liveGlobeViewer.scene.postProcessStages.fxaa.enabled = false;
-              
-              // Seed 3D entities and paths from any existing 2D history
-              try {
-                const C = Cesium;
-                liveTrackData.forEach((points, cs) => {
-                  if (!points || points.length === 0) return;
-                  if (!live3DTrackData.has(cs)) live3DTrackData.set(cs, []);
-
-                  // Create entity/path if missing
-                  if (!live3DEntities.has(cs)) {
-                    const last = points[points.length - 1]?.data || {};
-                    const lastPos = C.Cartesian3.fromDegrees(last.lon || 0, last.lat || 0, last.alt_m || 0);
-                    const entity = liveGlobeViewer.entities.add({
-                      id: cs,
-                      name: cs,
-                      position: lastPos,
-                      orientation: C.Transforms.headingPitchRollQuaternion(
-                        lastPos,
-                        C.HeadingPitchRoll.fromDegrees(last.hdg_deg || 0, last.pitch_deg || 0, last.roll_deg || 0)
-                      ),
-                      model: {
-                        uri: '/static/models/glider/Glider.glb',
-                        scale: 1.0,
-                        minimumPixelSize: 64,
-                        maximumScale: 100,
-                        runAnimations: false
-                      },
-                      label: {
-                        text: cs,
-                        font: '12pt sans-serif',
-                        pixelOffset: new C.Cartesian2(0, -60),
-                        fillColor: C.Color.YELLOW,
-                        outlineColor: C.Color.BLACK,
-                        outlineWidth: 2,
-                        style: C.LabelStyle.FILL_AND_OUTLINE,
-                        horizontalOrigin: C.HorizontalOrigin.CENTER,
-                        verticalOrigin: C.VerticalOrigin.BOTTOM,
-                        show: true
-                      }
-                    });
-                    live3DEntities.set(cs, entity);
-
-                    const positionsProperty = new C.CallbackProperty(function() {
-                      const trackData = live3DTrackData.get(cs) || [];
-                      return trackData.map(point => point.position);
-                    }, false);
-
-                    const pathEntity = liveGlobeViewer.entities.add({
-                      id: cs + '_path',
-                      name: cs + ' Flight Path',
-                      polyline: {
-                        positions: positionsProperty,
-                        width: 3,
-                        material: new C.PolylineGlowMaterialProperty({
-                          glowPower: 0.2,
-                          color: C.Color.fromCssColorString(getCallsignColor(cs))
-                        }),
-                        clampToGround: false,
-                        followSurface: false,
-                        arcType: C.ArcType.NONE,
-                        granularity: C.Math.RADIANS_PER_DEGREE,
-                        show: true
-                      }
-                    });
-                    live3DPaths.set(cs, pathEntity);
-                  }
-
-                  // Fill positions from stored 2D points
-                  const arr = live3DTrackData.get(cs);
-                  arr.length = 0;
-                  points.forEach(p => {
-                    const d = p.data || {};
-                    if (typeof d.lon !== 'number' || typeof d.lat !== 'number') return;
-                    const pos = C.Cartesian3.fromDegrees(d.lon, d.lat, d.alt_m || 0);
-                    arr.push({ position: pos, sample: { ...d }, timestamp: p.timestamp || Date.now() });
-                  });
-                });
-                liveGlobeViewer.scene.requestRender();
-              } catch (e) {
-                console.warn('3D seeding failed:', e);
-              }
-
-              // Add interaction detection for 3D follow mode
-              liveGlobeViewer.camera.moveStart.addEventListener(() => {
-                if (liveFollow3D) {
-                  liveFollow3D = false;
-                  updateFollowBtn();
-                  markUserInteraction();
-                }
-              });
-              
-              cb && cb();
-              resolve();
-            } catch(e) {
-              console.error('Failed to initialize Cesium:', e);
-              reject(e);
-            }
-          };
-          
-          script.onerror = reject;
-          document.body.appendChild(script);
-        });
-      }
+      // ensureLiveGlobe is now handled by the Globe3D class wrapper above
       
       // Function to update terrain provider dynamically
       async function updateTerrainProvider() {
@@ -3358,7 +3518,7 @@ INDEX_HTML = """
         if (is2D) {
           ensureLiveMap().then(() => setTimeout(() => liveMap && liveMap.invalidateSize(), 50));
         } else {
-          ensureLiveGlobe(() => setTimeout(() => liveGlobeViewer && liveGlobeViewer.resize(), 50));
+          ensureLiveGlobe(() => setTimeout(() => liveGlobe && liveGlobe.resize(), 50));
         }
       }
       
@@ -3556,9 +3716,9 @@ INDEX_HTML = """
           livePaths.forEach(path => liveMap.removeLayer(path));
         }
         
-        // Clear 3D globe data
-        if (liveGlobeViewer) {
-          liveGlobeViewer.entities.removeAll();
+        // Clear 3D globe data using Globe3D component
+        if (liveGlobe) {
+          liveGlobe.clearAll();
         }
         
         // Clear data structures
@@ -3655,12 +3815,15 @@ INDEX_HTML = """
           // Process historical tracks
           Object.entries(data.tracks || {}).forEach(([callsign, trackPoints]) => {
             if (trackPoints && trackPoints.length > 0) {
-              // Convert server history to our format
-              const formattedTrack = trackPoints.map(point => ({
-                pos: [point.lat, point.lon],
-                data: point,
-                timestamp: point.ts ? point.ts * 1000 : Date.now() // Convert to milliseconds
-              }));
+              // Convert server history to our format with validation
+              const formattedTrack = trackPoints
+                .filter(point => point && typeof point.lat === 'number' && typeof point.lon === 'number' && 
+                        Math.abs(point.lat) <= 90 && Math.abs(point.lon) <= 180)
+                .map(point => ({
+                  pos: [point.lat, point.lon],
+                  data: point,
+                  timestamp: point.ts ? point.ts * 1000 : Date.now() // Convert to milliseconds
+                }));
               
               // Merge with existing track data
               const existing = liveTrackData.get(callsign) || [];
@@ -3680,8 +3843,15 @@ INDEX_HTML = """
               
               // Create/update track visualization
               if (liveMap && unique.length > 1) {
-                const positions = unique.map(p => p.pos);
+                const positions = unique
+                  .filter(p => p.pos && Array.isArray(p.pos) && p.pos.length === 2 &&
+                          typeof p.pos[0] === 'number' && typeof p.pos[1] === 'number' &&
+                          Math.abs(p.pos[0]) <= 90 && Math.abs(p.pos[1]) <= 180)
+                  .map(p => p.pos);
                 const color = getCallsignColor(callsign);
+                
+                // Only create polylines if we have at least 2 valid positions
+                if (positions.length < 2) return;
                 
                 if (!livePaths.has(callsign)) {
                   const pathLine = L.polyline(positions, { 
@@ -3840,10 +4010,7 @@ INDEX_HTML = """
               liveFollow2D = false;
               liveFollow3D = true;
               ensureLiveGlobe(() => {
-                const entity = live3DEntities.get(cs);
-                if (entity && liveGlobeViewer) {
-                  liveGlobeViewer.trackedEntity = entity;
-                }
+                liveGlobe.trackEntity(cs);
               });
             }
             
@@ -4273,6 +4440,13 @@ INDEX_HTML = """
       
       // Actually render position to 2D map (separated from interpolation logic)
       function renderActual2DPositionSimple(cs, pos) {
+        // Validate position coordinates
+        if (!pos || !Array.isArray(pos) || pos.length !== 2 ||
+            typeof pos[0] !== 'number' || typeof pos[1] !== 'number' ||
+            Math.abs(pos[0]) > 90 || Math.abs(pos[1]) > 180) {
+          return; // Skip invalid positions
+        }
+        
         // Ensure live map is initialized
         if (!liveMap) {
           ensureLiveMap().then(() => renderActual2DPositionSimple(cs, pos));
@@ -4337,8 +4511,8 @@ INDEX_HTML = """
         }
       }
       
-      // Actually render position to 3D globe (separated from interpolation logic)
-      function renderActual3DPosition(cs, pos) {
+      // Actually render position to 3D globe using Globe3D component
+      async function renderActual3DPosition(cs, pos) {
         if (!liveGlobeViewer) return;
         
         // Throttle actual 3D rendering
@@ -4351,83 +4525,43 @@ INDEX_HTML = """
         
         const C = Cesium;
         
-        // Get or create 3D entity
-        let entity = live3DEntities.get(cs);
-        if (!entity) {
-          // Create 3D model entity with better label
-          entity = liveGlobeViewer.entities.add({
-            id: cs,
-            name: cs,
-            position: pos,
-            model: {
-              uri: '/static/models/glider/Glider.glb',
-              scale: 1.0,
-              minimumPixelSize: 64,
-              maximumScale: 100,
-              runAnimations: false
-            },
-            label: {
-              text: cs,
-              font: '12pt sans-serif',
-              pixelOffset: new C.Cartesian2(0, -60),
-              fillColor: C.Color.YELLOW,
-              outlineColor: C.Color.BLACK,
-              outlineWidth: 2,
-              style: C.LabelStyle.FILL_AND_OUTLINE,
-              horizontalOrigin: C.HorizontalOrigin.CENTER,
-              verticalOrigin: C.VerticalOrigin.BOTTOM,
-              show: true
-            }
-          });
-          
-          live3DEntities.set(cs, entity);
+        // Convert Cesium position back to lat/lon/alt for Globe3D API
+        const cartographic = C.Cartographic.fromCartesian(pos);
+        const position = {
+          lat: C.Math.toDegrees(cartographic.latitude),
+          lon: C.Math.toDegrees(cartographic.longitude),
+          alt: cartographic.height
+        };
+        
+        // Check if aircraft exists in Globe3D component
+        if (!liveGlobe.entities.has(cs)) {
+          // Create new aircraft using Globe3D API
+          await liveGlobe.addAircraft(cs, position, {}, cs);
+          // Keep backward compatibility references
+          live3DEntities.set(cs, liveGlobe.entities.get(cs));
+          live3DTrackData.set(cs, [{position: pos, timestamp: now}]);
           
           // Create debug axes if debug mode is active
           if (typeof debugAxes !== 'undefined' && debugAxes && typeof create3DDebugAxes === 'function') {
+            const entity = liveGlobe.entities.get(cs);
             try { create3DDebugAxes(cs, entity.position, entity.orientation); } catch(_) {}
           }
-          
-          // Create flight trail polyline
-          const pathEntity = liveGlobeViewer.entities.add({
-            id: cs + '_path',
-            name: cs + ' Flight Path',
-            polyline: {
-              positions: [pos], // Start with current position
-              width: 3,
-              material: C.Color.fromCssColorString(getCallsignColor(cs)),
-              clampToGround: false,
-              followSurface: false,
-              arcType: C.ArcType.NONE,
-              granularity: C.Math.RADIANS_PER_DEGREE,
-              show: true
-            }
-          });
-          
-          live3DPaths.set(cs, pathEntity);
-          live3DTrackData.set(cs, [{position: pos, timestamp: now}]);
         } else {
-          // Update existing entity position
-          entity.position = pos;
+          // Update existing aircraft using Globe3D API
+          await liveGlobe.updateAircraft(cs, position);
           
-          // Update flight trail
+          // Update flight trail data for backward compatibility
           const trackData = live3DTrackData.get(cs);
-          const pathEntity = live3DPaths.get(cs);
-          
-          if (trackData && pathEntity) {
+          if (trackData) {
             trackData.push({position: pos, timestamp: now});
-            
             // Keep only last 500 points for performance
             if (trackData.length > 500) {
               trackData.shift();
             }
-            
-            // Update polyline positions
-            const positions = trackData.map(point => point.position);
-            pathEntity.polyline.positions = positions;
           }
         }
         
-        // Request render for 3D
+        // Request render for 3D (Globe3D handles this internally but keep for compatibility)
         liveGlobeViewer.scene.requestRender();
       }
       

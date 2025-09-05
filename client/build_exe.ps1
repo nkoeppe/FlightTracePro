@@ -34,32 +34,55 @@ $WorkPath = Join-Path $BuildRoot 'build'
 $SpecPath = Join-Path $BuildRoot 'spec'
 New-Item -ItemType Directory -Force -Path $DistPath,$WorkPath,$SpecPath | Out-Null
 
-$argsList += @(
-  '--onefile','--name','FlightTracePro',
-  '--hidden-import','SimConnect',
-  '--collect-all','SimConnect',
-  '--collect-submodules','websockets',
-  '--collect-submodules','requests',
-  '--collect-data','certifi',
-  (Join-Path $PSScriptRoot 'msfs_bridge_gui.pyw'),
-  '--distpath', $DistPath,
-  '--workpath', $WorkPath,
-  '--specpath', $SpecPath
-)
+# Use spec file for better DLL handling and optimization
+$specFile = Join-Path $PSScriptRoot 'FlightTracePro.spec'
+if (Test-Path $specFile) {
+  Write-Host "[bridge] Using spec file for optimized build..." -ForegroundColor Green
+  $argsList = @('--clean', $specFile, '--distpath', $DistPath, '--workpath', $WorkPath)
+} else {
+  Write-Host "[bridge] Spec file not found, using fallback command line build..." -ForegroundColor Yellow
+  $argsList += @(
+    '--onefile','--name','FlightTracePro',
+    '--hidden-import','SimConnect',
+    '--collect-all','SimConnect',
+    '--collect-submodules','websockets',
+    '--collect-submodules','requests',
+    '--collect-data','certifi',
+    (Join-Path $PSScriptRoot 'msfs_bridge_gui.pyw'),
+    '--distpath', $DistPath,
+    '--workpath', $WorkPath,
+    '--specpath', $SpecPath
+  )
+}
 
-# Optionally bundle SimConnect.dll if present (local builds only)
-$vendorDll = Join-Path $PSScriptRoot 'vendor\SimConnect\x64\SimConnect.dll'
-if (Test-Path $vendorDll) {
-  Write-Host "[bridge] Bundling vendor SimConnect.dll: $vendorDll" -ForegroundColor Yellow
-  $argsList += @('--add-binary', "$vendorDll;.")
-} elseif ($env:FLIGHTTRACEPRO_SIMCONNECT_DLL_DIR) {
-  $cand = Join-Path $env:FLIGHTTRACEPRO_SIMCONNECT_DLL_DIR 'SimConnect.dll'
-  if (Test-Path $cand) {
-    Write-Host "[bridge] Bundling SimConnect.dll from env dir: $cand" -ForegroundColor Yellow
-    $argsList += @('--add-binary', "$cand;.")
+# Optionally bundle SimConnect.dll if present (local builds only) - only for fallback mode
+if (-not (Test-Path $specFile)) {
+  $vendorDll = Join-Path $PSScriptRoot 'vendor\SimConnect\x64\SimConnect.dll'
+  if (Test-Path $vendorDll) {
+    Write-Host "[bridge] Bundling vendor SimConnect.dll: $vendorDll" -ForegroundColor Yellow
+    $argsList += @('--add-binary', "$vendorDll;.")
+  } elseif ($env:FLIGHTTRACEPRO_SIMCONNECT_DLL_DIR) {
+    $cand = Join-Path $env:FLIGHTTRACEPRO_SIMCONNECT_DLL_DIR 'SimConnect.dll'
+    if (Test-Path $cand) {
+      Write-Host "[bridge] Bundling SimConnect.dll from env dir: $cand" -ForegroundColor Yellow
+      $argsList += @('--add-binary', "$cand;.")
+    }
   }
 }
 
 & $pyi @argsList
+
+# Test the built executable
+$exePath = Join-Path $DistPath 'FlightTracePro.exe'
+if (Test-Path $exePath) {
+  Write-Host "[bridge] Testing executable startup..." -ForegroundColor Cyan
+  # Quick test to ensure it doesn't crash immediately
+  $testResult = Start-Process -FilePath $exePath -ArgumentList '--version' -Wait -PassThru -WindowStyle Hidden -ErrorAction SilentlyContinue
+  if ($testResult.ExitCode -eq 0 -or $testResult.ExitCode -eq $null) {
+    Write-Host "[bridge] ✅ Executable test passed" -ForegroundColor Green
+  } else {
+    Write-Host "[bridge] ⚠️  Executable may have issues (exit code: $($testResult.ExitCode))" -ForegroundColor Yellow
+  }
+}
 
 Write-Host "[bridge] Built $DistPath\FlightTracePro.exe" -ForegroundColor Green
