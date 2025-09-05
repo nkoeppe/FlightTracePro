@@ -854,8 +854,8 @@ timeout /t 5 /nobreak >nul
 
 echo Step 2: Extended wait for file system...
 echo [%date% %time%] Step 2: Extended wait for file system... >> "%LOGFILE%"
-echo Waiting 10 more seconds for Windows to fully release file locks...
-timeout /t 10 /nobreak >nul
+echo Waiting 3 more seconds for Windows to fully release file locks...
+timeout /t 3 /nobreak >nul
 echo [%date% %time%] Extended wait completed >> "%LOGFILE%"
 
 echo Step 3: Creating backup...
@@ -879,87 +879,106 @@ if exist "{cur}" (
 
 echo Step 4: Installing new version...
 echo [%date% %time%] Step 4: Installing new version... >> "%LOGFILE%"
+
+REM Wait a moment for any file system delays
+timeout /t 2 /nobreak >nul
+
+REM Check if new EXE exists with retry logic
+set FILE_CHECK_RETRY=0
+:check_new_exe
+set /a FILE_CHECK_RETRY+=1
 if exist "{newexe}" (
-    echo [%date% %time%] Attempting to install new version with aggressive retry... >> "%LOGFILE%"
-    
-    REM Simple but aggressive retry with longer waits
-    set UPDATE_RETRY=0
-    :update_retry
-    set /a UPDATE_RETRY+=1
-    echo [%date% %time%] Update attempt %UPDATE_RETRY%/20... >> "%LOGFILE%"
-    echo Installing new version... (attempt %UPDATE_RETRY%/20)
-    
-    REM Delete target first to reduce conflicts
-    if exist "{cur}" del "{cur}" >nul 2>&1
-    
-    REM Wait a moment for filesystem
+    echo [%date% %time%] New EXE found on check attempt !FILE_CHECK_RETRY! >> "%LOGFILE%"
+    goto file_check_success
+)
+
+echo [%date% %time%] New EXE check attempt !FILE_CHECK_RETRY!/5: File not found >> "%LOGFILE%"
+if !FILE_CHECK_RETRY! LSS 5 (
     timeout /t 1 /nobreak >nul
+    goto check_new_exe
+)
+
+echo [%date% %time%] ERROR: New EXE not found after 5 attempts: {newexe} >> "%LOGFILE%"
+echo ERROR: New EXE not found after 5 attempts!
+pause
+exit /b 1
+
+:file_check_success
+
+echo [%date% %time%] New EXE found, attempting to install with aggressive retry... >> "%LOGFILE%"
+
+REM Simple but aggressive retry with longer waits
+set UPDATE_RETRY=0
+:update_retry
+set /a UPDATE_RETRY+=1
+echo [%date% %time%] Update attempt !UPDATE_RETRY!/20... >> "%LOGFILE%"
+echo Installing new version... (attempt !UPDATE_RETRY!/20)
+
+REM Delete target first to reduce conflicts
+if exist "{cur}" del "{cur}" >nul 2>&1
+
+REM Wait a moment for filesystem
+timeout /t 1 /nobreak >nul
+
+REM Copy with /Y flag for overwrite
+copy /Y "{newexe}" "{cur}" >nul 2>&1
+
+REM Verify the copy worked by checking if file exists and has correct size
+if exist "{cur}" (
+    echo [%date% %time%] Copy appeared successful, verifying file... >> "%LOGFILE%"
+    REM Compare file sizes to ensure copy was complete
+    for %%A in ("{newexe}") do set NEWSIZE=%%~zA
+    for %%B in ("{cur}") do set CURSIZE=%%~zB
     
-    REM Copy with /Y flag for overwrite
-    copy /Y "{newexe}" "{cur}" >nul 2>&1
-    
-    REM Verify the copy worked by checking if file exists and has correct size
-    if exist "{cur}" (
-        echo [%date% %time%] Copy appeared successful, verifying file... >> "%LOGFILE%"
-        REM Compare file sizes to ensure copy was complete
-        for %%A in ("{newexe}") do set NEWSIZE=%%~zA
-        for %%B in ("{cur}") do set CURSIZE=%%~zB
-        
-        if "!NEWSIZE!"=="!CURSIZE!" (
-            echo [%date% %time%] File sizes match - update successful! >> "%LOGFILE%"
-            echo Update successful! File sizes match.
-            goto update_success
-        ) else (
-            echo [%date% %time%] File size mismatch - copy incomplete (New: !NEWSIZE!, Current: !CURSIZE!) >> "%LOGFILE%"
-            echo File size mismatch - copy incomplete
-        )
+    if "!NEWSIZE!"=="!CURSIZE!" (
+        echo [%date% %time%] File sizes match - update successful! >> "%LOGFILE%"
+        echo Update successful! File sizes match.
+        goto update_success
     ) else (
-        echo [%date% %time%] Target file does not exist after copy >> "%LOGFILE%"
-        echo Copy failed - target file missing
+        echo [%date% %time%] File size mismatch - copy incomplete (New: !NEWSIZE!, Current: !CURSIZE!) >> "%LOGFILE%"
+        echo File size mismatch - copy incomplete
     )
-    
-    REM Retry logic with exponential backoff
-    if %UPDATE_RETRY% LSS 20 (
-        if %UPDATE_RETRY% LSS 5 (
-            set WAIT_TIME=2
-        ) else if %UPDATE_RETRY% LSS 10 (
-            set WAIT_TIME=5
-        ) else (
-            set WAIT_TIME=10
-        )
-        
-        echo [%date% %time%] Copy failed, waiting !WAIT_TIME! seconds before retry... >> "%LOGFILE%"
-        echo Copy failed, waiting !WAIT_TIME! seconds before retry...
-        timeout /t !WAIT_TIME! /nobreak >nul
-        goto update_retry
-    ) else (
-        echo [%date% %time%] ERROR: Update failed after 20 attempts! >> "%LOGFILE%"
-        echo ERROR: Update failed after 20 attempts!
-        echo.  
-        echo This is likely caused by:
-        echo - Windows Defender real-time protection
-        echo - Antivirus software blocking file replacement
-        echo - Windows file system indexing
-        echo.
-        echo MANUAL UPDATE REQUIRED:
-        echo 1. Temporarily disable Windows Defender real-time protection
-        echo 2. Download the latest release from GitHub
-        echo 3. Replace the executable manually
-        echo.
-        echo Restoring backup...
-        copy "{cur}.backup" "{cur}" >nul 2>&1
-        echo Backup restored.
-        pause
-        exit /b 1
-    )
-    
-    :update_success
 ) else (
-    echo [%date% %time%] ERROR: New EXE not found: {newexe} >> "%LOGFILE%"
-    echo ERROR: New EXE not found!
+    echo [%date% %time%] Target file does not exist after copy >> "%LOGFILE%"
+    echo Copy failed - target file missing
+)
+
+REM Retry logic with exponential backoff
+if !UPDATE_RETRY! LSS 20 (
+    if !UPDATE_RETRY! LSS 5 (
+        set WAIT_TIME=1
+    ) else if !UPDATE_RETRY! LSS 10 (
+        set WAIT_TIME=2
+    ) else (
+        set WAIT_TIME=3
+    )
+    
+    echo [%date% %time%] Copy failed, waiting !WAIT_TIME! seconds before retry... >> "%LOGFILE%"
+    echo Copy failed, waiting !WAIT_TIME! seconds before retry...
+    timeout /t !WAIT_TIME! /nobreak >nul
+    goto update_retry
+) else (
+    echo [%date% %time%] ERROR: Update failed after 20 attempts! >> "%LOGFILE%"
+    echo ERROR: Update failed after 20 attempts!
+    echo.  
+    echo This is likely caused by:
+    echo - Windows Defender real-time protection
+    echo - Antivirus software blocking file replacement
+    echo - Windows file system indexing
+    echo.
+    echo MANUAL UPDATE REQUIRED:
+    echo 1. Temporarily disable Windows Defender real-time protection
+    echo 2. Download the latest release from GitHub
+    echo 3. Replace the executable manually
+    echo.
+    echo Restoring backup...
+    copy "{cur}.backup" "{cur}" >nul 2>&1
+    echo Backup restored.
     pause
     exit /b 1
 )
+
+:update_success
 
 echo Step 5: Cleaning up...
 echo [%date% %time%] Step 5: Cleaning up... >> "%LOGFILE%"
