@@ -2792,7 +2792,9 @@ INDEX_HTML = """
         async function ensureGlider() {
           if (!converterGlobe.entities.has('preview')) {
             const p0 = posAt(0);
-            await converterGlobe.addAircraft('preview', p0, {}, 'Preview');
+            // Convert ele to alt for Globe3D API compatibility
+            const position = { lat: p0.lat, lon: p0.lon, alt: p0.ele || 0 };
+            await converterGlobe.addAircraft('preview', position, {}, 'Preview');
             gliderEnt = converterGlobe.entities.get('preview');
           }
           return converterGlobe.entities.get('preview');
@@ -2800,7 +2802,9 @@ INDEX_HTML = """
 
         async function update3DView() {
           const p = posAt(flyIndex);
-          await converterGlobe.updateAircraft('preview', p);
+          // Convert ele to alt for Globe3D API compatibility
+          const position = { lat: p.lat, lon: p.lon, alt: p.ele || 0 };
+          await converterGlobe.updateAircraft('preview', position);
           if (followCam) {
             await converterGlobe.trackEntity('preview');
           }

@@ -687,90 +687,127 @@ class MainWindow(QMainWindow):
             cur = os.path.abspath(sys.executable)
             bat = os.path.join(tmpdir, 'flighttracepro_update.bat')
             
-            # More robust batch file with better error handling
+            # Create a simpler, more reliable batch file
             with open(bat, 'w') as bf:
                 bf.write(f"""@echo off
 title FlightTracePro Updater
-echo [FlightTracePro Updater] Starting update process...
+echo.
+echo ========================================
+echo FlightTracePro Auto-Updater
+echo ========================================
+echo.
 
-set TARGET="{cur}"
-set NEW="{newexe}"
-set BACKUP="%TARGET%.backup"
+echo Step 1: Waiting for application to close...
+timeout /t 3 /nobreak >nul
 
-echo [FlightTracePro Updater] Waiting for application to close...
-timeout /t 5 /nobreak >nul
-
-echo [FlightTracePro Updater] Creating backup...
-copy "%TARGET%" "%BACKUP%" >nul 2>&1
-
-echo [FlightTracePro Updater] Installing new version...
-:update_loop
-copy /Y "%NEW%" "%TARGET%" >nul 2>&1
+echo Step 2: Creating backup...
+copy "{cur}" "{cur}.backup" >nul 2>&1
 if errorlevel 1 (
-    echo [FlightTracePro Updater] Copy failed, retrying...
-    timeout /t 2 /nobreak >nul
-    goto update_loop
-)
-
-echo [FlightTracePro Updater] Verifying update...
-if not exist "%TARGET%" (
-    echo [FlightTracePro Updater] CRITICAL ERROR: Target executable missing!
-    echo [FlightTracePro Updater] Restoring backup...
-    copy "%BACKUP%" "%TARGET%" >nul 2>&1
-    echo [FlightTracePro Updater] Backup restored. Please try update again.
+    echo ERROR: Could not create backup!
     pause
     exit /b 1
 )
 
-echo [FlightTracePro Updater] Update completed successfully!
-del "%BACKUP%" >nul 2>&1
-
-echo [FlightTracePro Updater] Restarting application...
-timeout /t 3 /nobreak >nul
-
-REM Test the new executable first
-echo [FlightTracePro Updater] Testing new executable...
-"%TARGET%" --version >nul 2>&1
+echo Step 3: Installing new version...
+copy /Y "{newexe}" "{cur}" >nul 2>&1
 if errorlevel 1 (
-    echo [FlightTracePro Updater] WARNING: New executable may have issues
-    echo [FlightTracePro Updater] Attempting to start anyway...
-)
-
-start "" "%TARGET%"
-if errorlevel 1 (
-    echo [FlightTracePro Updater] Failed to restart application!
-    echo [FlightTracePro Updater] Please manually start: %TARGET%
+    echo ERROR: Update failed! Restoring backup...
+    copy "{cur}.backup" "{cur}" >nul 2>&1
+    echo Backup restored.
     pause
+    exit /b 1
 )
 
-REM Cleanup
-del "%NEW%" >nul 2>&1
+echo Step 4: Cleaning up...
+del "{cur}.backup" >nul 2>&1
+del "{newexe}" >nul 2>&1
+
+echo Step 5: Restarting application...
+timeout /t 2 /nobreak >nul
+
+echo Starting: "{cur}"
+start "" "{cur}"
+
+echo.
+echo Update complete! Application should restart now.
 timeout /t 3 /nobreak >nul
+
+REM Self-delete
 del "%~f0" >nul 2>&1
 """)
             
+            self.append_log(f"[update] Created batch file: {bat}")
+            
+            # Verify batch file was created
+            if not os.path.exists(bat):
+                self.append_log(f"[update] ERROR: Failed to create batch file!")
+                return
+                
+            self.append_log(f"[update] Batch file size: {os.path.getsize(bat)} bytes")
+            
+            # Show batch file contents for debugging
+            try:
+                with open(bat, 'r') as f:
+                    content_preview = f.read()[:200] + "..." if len(f.read()) > 200 else f.read()
+                    f.seek(0)  # Reset file pointer
+                    content_preview = f.read()[:200]
+                self.append_log(f"[update] Batch preview: {content_preview}")
+            except Exception as preview_error:
+                self.append_log(f"[update] Could not preview batch file: {preview_error}")
+            
             self.append_log(f"[update] Starting update process...")
             
-            # Spawn updater and exit with proper error handling
+            # Try multiple launch methods
+            launched = False
+            
+            # Method 1: subprocess with visible console
             try:
                 import subprocess
-                # Use CREATE_NEW_CONSOLE to show update progress
-                subprocess.Popen(bat, shell=True, creationflags=subprocess.CREATE_NEW_CONSOLE if hasattr(subprocess, 'CREATE_NEW_CONSOLE') else 0)
-                self.append_log(f"[update] Update process started - application will restart")
+                self.append_log(f"[update] Attempting subprocess launch...")
+                proc = subprocess.Popen(
+                    bat,
+                    shell=True,
+                    creationflags=subprocess.CREATE_NEW_CONSOLE if hasattr(subprocess, 'CREATE_NEW_CONSOLE') else 0,
+                    cwd=os.path.dirname(bat)
+                )
+                self.append_log(f"[update] Subprocess started with PID: {proc.pid}")
+                launched = True
+            except Exception as subprocess_error:
+                self.append_log(f"[update] Subprocess failed: {subprocess_error}")
+            
+            # Method 2: os.startfile fallback
+            if not launched:
+                try:
+                    self.append_log(f"[update] Attempting startfile launch...")
+                    os.startfile(bat)
+                    launched = True
+                    self.append_log(f"[update] Started with os.startfile")
+                except Exception as startfile_error:
+                    self.append_log(f"[update] Startfile failed: {startfile_error}")
+            
+            # Method 3: system command fallback
+            if not launched:
+                try:
+                    self.append_log(f"[update] Attempting system command launch...")
+                    os.system(f'start "" "{bat}"')
+                    launched = True
+                    self.append_log(f"[update] Started with os.system")
+                except Exception as system_error:
+                    self.append_log(f"[update] System command failed: {system_error}")
+            
+            if launched:
+                self.append_log(f"[update] Update process started - application will restart in 5 seconds")
                 # Give the batch file time to start
                 import time
-                time.sleep(2)
+                time.sleep(3)
+                self.append_log(f"[update] Exiting application for update...")
+                time.sleep(1)
                 os._exit(0)
-            except Exception as launch_error:
-                self.append_log(f"[update] Failed to launch updater: {launch_error}")
-                # Fallback: try the old method
-                try:
-                    os.startfile(bat)
-                    time.sleep(1)
-                    os._exit(0)
-                except Exception as fallback_error:
-                    self.append_log(f"[update] Fallback failed too: {fallback_error}")
-                    self.append_log(f"[update] Manual update required - download from releases page")
+            else:
+                self.append_log(f"[update] ERROR: All launch methods failed!")
+                self.append_log(f"[update] Manual update required:")
+                self.append_log(f"[update] 1. Download new version from GitHub releases")
+                self.append_log(f"[update] 2. Or run this batch file manually: {bat}")
         except Exception as e:
             self.append_log(f"[update] {e}")
 
