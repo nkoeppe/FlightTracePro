@@ -849,10 +849,38 @@ echo Log file: %LOGFILE%
 
 echo Step 1: Waiting for application to close...
 echo [%date% %time%] Step 1: Waiting for app to close... >> "%LOGFILE%"
-timeout /t 3 /nobreak >nul
+timeout /t 5 /nobreak >nul
 
-echo Step 2: Creating backup...
-echo [%date% %time%] Step 2: Creating backup... >> "%LOGFILE%"
+echo Step 2: Waiting for file to unlock...
+echo [%date% %time%] Step 2: Checking if file is unlocked... >> "%LOGFILE%"
+set RETRY_COUNT=0
+:wait_unlock
+set /a RETRY_COUNT+=1
+echo [%date% %time%] Attempt %RETRY_COUNT%: Testing file access... >> "%LOGFILE%"
+
+REM Try to open file exclusively to test if it's locked
+copy "{cur}" "{cur}.test" >nul 2>&1
+if errorlevel 1 (
+    if %RETRY_COUNT% LSS 20 (
+        echo [%date% %time%] File still locked, waiting 2 seconds... >> "%LOGFILE%"
+        echo File still locked, waiting... (attempt %RETRY_COUNT%/20)
+        timeout /t 2 /nobreak >nul
+        goto wait_unlock
+    ) else (
+        echo [%date% %time%] ERROR: File appears to be permanently locked! >> "%LOGFILE%"
+        echo ERROR: Unable to access file after 40 seconds!
+        echo Try closing any antivirus, file managers, or other programs.
+        pause
+        exit /b 1
+    )
+) else (
+    del "{cur}.test" >nul 2>&1
+    echo [%date% %time%] File is now accessible >> "%LOGFILE%"
+    echo File is now accessible!
+)
+
+echo Step 3: Creating backup...
+echo [%date% %time%] Step 3: Creating backup... >> "%LOGFILE%"
 if exist "{cur}" (
     copy "{cur}" "{cur}.backup" >nul 2>&1
     if errorlevel 1 (
@@ -870,19 +898,31 @@ if exist "{cur}" (
     exit /b 1
 )
 
-echo Step 3: Installing new version...
-echo [%date% %time%] Step 3: Installing new version... >> "%LOGFILE%"
+echo Step 4: Installing new version...
+echo [%date% %time%] Step 4: Installing new version... >> "%LOGFILE%"
 if exist "{newexe}" (
+    set UPDATE_RETRY=0
+    :update_retry
+    set /a UPDATE_RETRY+=1
+    echo [%date% %time%] Update attempt %UPDATE_RETRY%... >> "%LOGFILE%"
     copy /Y "{newexe}" "{cur}" >nul 2>&1
     if errorlevel 1 (
-        echo [%date% %time%] ERROR: Update failed! Restoring backup... >> "%LOGFILE%"
-        echo ERROR: Update failed! Restoring backup...
-        copy "{cur}.backup" "{cur}" >nul 2>&1
-        echo Backup restored.
-        pause
-        exit /b 1
+        if %UPDATE_RETRY% LSS 10 (
+            echo [%date% %time%] Copy failed, retrying in 1 second... >> "%LOGFILE%"
+            echo Copy failed, retrying... (attempt %UPDATE_RETRY%/10)
+            timeout /t 1 /nobreak >nul
+            goto update_retry
+        ) else (
+            echo [%date% %time%] ERROR: Update failed after 10 attempts! Restoring backup... >> "%LOGFILE%"
+            echo ERROR: Update failed! Restoring backup...
+            copy "{cur}.backup" "{cur}" >nul 2>&1
+            echo Backup restored.
+            pause
+            exit /b 1
+        )
     ) else (
         echo [%date% %time%] New version installed successfully >> "%LOGFILE%"
+        echo Update successful!
     )
 ) else (
     echo [%date% %time%] ERROR: New EXE not found: {newexe} >> "%LOGFILE%"
@@ -891,13 +931,13 @@ if exist "{newexe}" (
     exit /b 1
 )
 
-echo Step 4: Cleaning up...
-echo [%date% %time%] Step 4: Cleaning up... >> "%LOGFILE%"
+echo Step 5: Cleaning up...
+echo [%date% %time%] Step 5: Cleaning up... >> "%LOGFILE%"
 del "{cur}.backup" >nul 2>&1
 del "{newexe}" >nul 2>&1
 
-echo Step 5: Restarting application...
-echo [%date% %time%] Step 5: Restarting application... >> "%LOGFILE%"
+echo Step 6: Restarting application...
+echo [%date% %time%] Step 6: Restarting application... >> "%LOGFILE%"
 timeout /t 2 /nobreak >nul
 
 echo Starting: "{cur}"
