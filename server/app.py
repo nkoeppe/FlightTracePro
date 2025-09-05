@@ -3821,7 +3821,7 @@ INDEX_HTML = """
             if (trackPoints && trackPoints.length > 0) {
               // Convert server history to our format with validation
               const formattedTrack = trackPoints
-                .filter(point => point && typeof point.lat === 'number' && typeof point.lon === 'number' && 
+                .filter(point => point && isFiniteNum(point.lat) && isFiniteNum(point.lon) && 
                         Math.abs(point.lat) <= 90 && Math.abs(point.lon) <= 180)
                 .map(point => ({
                   pos: [point.lat, point.lon],
@@ -3849,7 +3849,7 @@ INDEX_HTML = """
               if (liveMap && unique.length > 1) {
                 const positions = unique
                   .filter(p => p.pos && Array.isArray(p.pos) && p.pos.length === 2 &&
-                          typeof p.pos[0] === 'number' && typeof p.pos[1] === 'number' &&
+                          isFiniteNum(p.pos[0]) && isFiniteNum(p.pos[1]) &&
                           Math.abs(p.pos[0]) <= 90 && Math.abs(p.pos[1]) <= 180)
                   .map(p => p.pos);
                 const color = getCallsignColor(callsign);
@@ -4063,6 +4063,13 @@ INDEX_HTML = """
       function updateLivePosition(sample) {
         if (!sample || !sample.lat || !sample.lon) return;
         
+        // Validate coordinates are valid finite numbers within proper ranges
+        if (!isFiniteNum(sample.lat) || !isFiniteNum(sample.lon) || 
+            Math.abs(sample.lat) > 90 || Math.abs(sample.lon) > 180) {
+          console.warn('Invalid coordinates in updateLivePosition:', sample.lat, sample.lon);
+          return;
+        }
+        
         const cs = sample.callsign || 'ACFT';
         const now = Date.now();
         const pos = [sample.lat, sample.lon];
@@ -4200,7 +4207,8 @@ INDEX_HTML = """
             weight: 3, 
             opacity: 0.7,
             bubblingMouseEvents: false
-          }).addTo(liveMap);
+          });
+          if (pathLine) pathLine.addTo(liveMap);
           
           // Create invisible wider polyline for better hover detection - this is AWESOME!
           const hoverLine = L.polyline([pos], { 
@@ -4209,7 +4217,8 @@ INDEX_HTML = """
             opacity: 0,
             interactive: true,
             bubblingMouseEvents: false
-          }).addTo(liveMap);
+          });
+          if (hoverLine) hoverLine.addTo(liveMap);
           
           // Function to find closest track point and show tooltip - SUPER NICE feature!
           function showTrackTooltip(e) {
@@ -4446,7 +4455,7 @@ INDEX_HTML = """
       function renderActual2DPositionSimple(cs, pos) {
         // Validate position coordinates
         if (!pos || !Array.isArray(pos) || pos.length !== 2 ||
-            typeof pos[0] !== 'number' || typeof pos[1] !== 'number' ||
+            !isFiniteNum(pos[0]) || !isFiniteNum(pos[1]) ||
             Math.abs(pos[0]) > 90 || Math.abs(pos[1]) > 180) {
           return; // Skip invalid positions
         }
@@ -4499,8 +4508,11 @@ INDEX_HTML = """
             color: getCallsignColor(cs),
             weight: 2,
             opacity: 0.8
-          }).addTo(liveMap);
-          livePaths.set(cs, pathLine);
+          });
+          if (pathLine) {
+            pathLine.addTo(liveMap);
+            livePaths.set(cs, pathLine);
+          }
         } else {
           // Add new position to path
           const currentPath = pathLine.getLatLngs();

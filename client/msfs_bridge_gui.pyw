@@ -687,56 +687,102 @@ class MainWindow(QMainWindow):
             cur = os.path.abspath(sys.executable)
             bat = os.path.join(tmpdir, 'flighttracepro_update.bat')
             
-            # Create a simpler, more reliable batch file
+            # Create batch file with logging
+            log_file = os.path.join(tmpdir, 'flighttracepro_update.log')
             with open(bat, 'w') as bf:
                 bf.write(f"""@echo off
 title FlightTracePro Updater
+set LOGFILE="{log_file}"
+
+echo [%date% %time%] FlightTracePro Auto-Updater Started >> "%LOGFILE%"
+echo [%date% %time%] Target: {cur} >> "%LOGFILE%"
+echo [%date% %time%] New EXE: {newexe} >> "%LOGFILE%"
+echo [%date% %time%] Batch: %~f0 >> "%LOGFILE%"
+
 echo.
 echo ========================================
 echo FlightTracePro Auto-Updater
 echo ========================================
 echo.
+echo Log file: %LOGFILE%
 
 echo Step 1: Waiting for application to close...
+echo [%date% %time%] Step 1: Waiting for app to close... >> "%LOGFILE%"
 timeout /t 3 /nobreak >nul
 
 echo Step 2: Creating backup...
-copy "{cur}" "{cur}.backup" >nul 2>&1
-if errorlevel 1 (
-    echo ERROR: Could not create backup!
+echo [%date% %time%] Step 2: Creating backup... >> "%LOGFILE%"
+if exist "{cur}" (
+    copy "{cur}" "{cur}.backup" >nul 2>&1
+    if errorlevel 1 (
+        echo [%date% %time%] ERROR: Could not create backup! >> "%LOGFILE%"
+        echo ERROR: Could not create backup!
+        pause
+        exit /b 1
+    ) else (
+        echo [%date% %time%] Backup created successfully >> "%LOGFILE%"
+    )
+) else (
+    echo [%date% %time%] ERROR: Original EXE not found: {cur} >> "%LOGFILE%"
+    echo ERROR: Original EXE not found!
     pause
     exit /b 1
 )
 
 echo Step 3: Installing new version...
-copy /Y "{newexe}" "{cur}" >nul 2>&1
-if errorlevel 1 (
-    echo ERROR: Update failed! Restoring backup...
-    copy "{cur}.backup" "{cur}" >nul 2>&1
-    echo Backup restored.
+echo [%date% %time%] Step 3: Installing new version... >> "%LOGFILE%"
+if exist "{newexe}" (
+    copy /Y "{newexe}" "{cur}" >nul 2>&1
+    if errorlevel 1 (
+        echo [%date% %time%] ERROR: Update failed! Restoring backup... >> "%LOGFILE%"
+        echo ERROR: Update failed! Restoring backup...
+        copy "{cur}.backup" "{cur}" >nul 2>&1
+        echo Backup restored.
+        pause
+        exit /b 1
+    ) else (
+        echo [%date% %time%] New version installed successfully >> "%LOGFILE%"
+    )
+) else (
+    echo [%date% %time%] ERROR: New EXE not found: {newexe} >> "%LOGFILE%"
+    echo ERROR: New EXE not found!
     pause
     exit /b 1
 )
 
 echo Step 4: Cleaning up...
+echo [%date% %time%] Step 4: Cleaning up... >> "%LOGFILE%"
 del "{cur}.backup" >nul 2>&1
 del "{newexe}" >nul 2>&1
 
 echo Step 5: Restarting application...
+echo [%date% %time%] Step 5: Restarting application... >> "%LOGFILE%"
 timeout /t 2 /nobreak >nul
 
 echo Starting: "{cur}"
+echo [%date% %time%] Starting: {cur} >> "%LOGFILE%"
 start "" "{cur}"
+if errorlevel 1 (
+    echo [%date% %time%] ERROR: Failed to start application >> "%LOGFILE%"
+    echo ERROR: Failed to start application!
+    pause
+    exit /b 1
+) else (
+    echo [%date% %time%] Application started successfully >> "%LOGFILE%"
+)
 
 echo.
 echo Update complete! Application should restart now.
+echo [%date% %time%] Update process completed >> "%LOGFILE%"
 timeout /t 3 /nobreak >nul
 
-REM Self-delete
+REM Self-delete (but keep log file for debugging)
+echo [%date% %time%] Self-deleting batch file... >> "%LOGFILE%"
 del "%~f0" >nul 2>&1
 """)
             
             self.append_log(f"[update] Created batch file: {bat}")
+            self.append_log(f"[update] Log file will be: {log_file}")
             
             # Verify batch file was created
             if not os.path.exists(bat):
@@ -760,20 +806,54 @@ del "%~f0" >nul 2>&1
             # Try multiple launch methods
             launched = False
             
-            # Method 1: subprocess with visible console
+            # Method 1: subprocess with proper detachment
             try:
                 import subprocess
                 self.append_log(f"[update] Attempting subprocess launch...")
-                proc = subprocess.Popen(
-                    bat,
-                    shell=True,
-                    creationflags=subprocess.CREATE_NEW_CONSOLE if hasattr(subprocess, 'CREATE_NEW_CONSOLE') else 0,
-                    cwd=os.path.dirname(bat)
-                )
+                
+                # Try different subprocess approaches
+                if hasattr(subprocess, 'CREATE_NEW_CONSOLE'):
+                    # Windows: Create new console window
+                    proc = subprocess.Popen(
+                        [bat],
+                        shell=False,
+                        creationflags=subprocess.CREATE_NEW_CONSOLE | subprocess.DETACHED_PROCESS,
+                        cwd=os.path.dirname(bat),
+                        stdin=subprocess.DEVNULL,
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL
+                    )
+                else:
+                    # Fallback
+                    proc = subprocess.Popen(
+                        [bat],
+                        shell=True,
+                        cwd=os.path.dirname(bat),
+                        stdin=subprocess.DEVNULL,
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL
+                    )
+                
                 self.append_log(f"[update] Subprocess started with PID: {proc.pid}")
+                
+                # Don't wait for the process - let it run independently
                 launched = True
             except Exception as subprocess_error:
                 self.append_log(f"[update] Subprocess failed: {subprocess_error}")
+                
+                # Try the cmd.exe wrapper approach
+                try:
+                    self.append_log(f"[update] Trying cmd.exe wrapper...")
+                    proc = subprocess.Popen(
+                        ['cmd.exe', '/c', 'start', '/min', bat],
+                        shell=False,
+                        creationflags=subprocess.DETACHED_PROCESS if hasattr(subprocess, 'DETACHED_PROCESS') else 0,
+                        cwd=os.path.dirname(bat)
+                    )
+                    self.append_log(f"[update] CMD wrapper started with PID: {proc.pid}")
+                    launched = True
+                except Exception as cmd_error:
+                    self.append_log(f"[update] CMD wrapper failed: {cmd_error}")
             
             # Method 2: os.startfile fallback
             if not launched:
@@ -797,6 +877,7 @@ del "%~f0" >nul 2>&1
             
             if launched:
                 self.append_log(f"[update] Update process started - application will restart in 5 seconds")
+                self.append_log(f"[update] Check update log after restart: {log_file}")
                 # Give the batch file time to start
                 import time
                 time.sleep(3)
@@ -808,6 +889,20 @@ del "%~f0" >nul 2>&1
                 self.append_log(f"[update] Manual update required:")
                 self.append_log(f"[update] 1. Download new version from GitHub releases")
                 self.append_log(f"[update] 2. Or run this batch file manually: {bat}")
+                self.append_log(f"[update] 3. Check the log file: {log_file}")
+                
+                # Try to run the batch file manually as a test
+                try:
+                    self.append_log(f"[update] Attempting manual test run...")
+                    import subprocess
+                    result = subprocess.run([bat], shell=True, capture_output=True, text=True, timeout=10)
+                    self.append_log(f"[update] Manual test - return code: {result.returncode}")
+                    if result.stdout:
+                        self.append_log(f"[update] Manual test - stdout: {result.stdout[:200]}")
+                    if result.stderr:
+                        self.append_log(f"[update] Manual test - stderr: {result.stderr[:200]}")
+                except Exception as test_error:
+                    self.append_log(f"[update] Manual test failed: {test_error}")
         except Exception as e:
             self.append_log(f"[update] {e}")
 
