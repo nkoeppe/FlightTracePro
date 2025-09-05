@@ -3036,7 +3036,7 @@ INDEX_HTML = """
             orientation: C.Transforms.headingPitchRollQuaternion(
               pos,
               C.HeadingPitchRoll.fromDegrees(
-                orientation.hdg || 0, 
+                (orientation.hdg || 0) + 90, // Add 90 degrees to fix aircraft orientation
                 orientation.pitch || 0, 
                 orientation.roll || 0
               )
@@ -3592,6 +3592,191 @@ INDEX_HTML = """
       let live3DDebugAxes = new Map(); // callsign -> debug axes entities
       let live3DLastLL = new Map();   // callsign -> {lat,lon}
       
+      // Debug mode state
+      let debugAxes = false;
+      
+      // Function to create 3D debug axes for aircraft orientation
+      function create3DDebugAxes(callsign, position, orientation) {
+        if (!liveGlobeViewer || !Cesium) return;
+        
+        const C = Cesium;
+        
+        // Remove existing debug axes
+        remove3DDebugAxes(callsign);
+        
+        // Get the aircraft's current position as Cartesian3
+        let aircraftPosition;
+        
+        if (typeof position === 'function') {
+          aircraftPosition = position.getValue(C.JulianDate.now());
+        } else if (position instanceof C.Cartesian3) {
+          aircraftPosition = position;
+        } else if (position && typeof position.getValue === 'function') {
+          // It's a ConstantPositionProperty or similar
+          aircraftPosition = position.getValue(C.JulianDate.now());
+        } else if (position && position._value && position._value instanceof C.Cartesian3) {
+          // Direct access to the internal _value
+          aircraftPosition = position._value;
+        } else if (position && typeof position.x === 'number' && typeof position.y === 'number' && typeof position.z === 'number') {
+          // It's a plain object with x,y,z coordinates
+          aircraftPosition = new C.Cartesian3(position.x, position.y, position.z);
+        } else {
+          console.warn('Invalid position for debug axes:', position);
+          return;
+        }
+        
+        if (!aircraftPosition) return;
+        
+        // Create axis length (in meters)
+        const axisLength = 100.0;
+        
+        // Calculate end points for each axis in world coordinates
+        const transform = C.Transforms.eastNorthUpToFixedFrame(aircraftPosition);
+        
+        // Calculate axis end points
+        const xAxisEnd = C.Matrix4.multiplyByPoint(transform, new C.Cartesian3(axisLength, 0, 0), new C.Cartesian3());
+        const yAxisEnd = C.Matrix4.multiplyByPoint(transform, new C.Cartesian3(0, axisLength, 0), new C.Cartesian3());
+        const zAxisEnd = C.Matrix4.multiplyByPoint(transform, new C.Cartesian3(0, 0, axisLength), new C.Cartesian3());
+        
+        // Create coordinate system axes using polylines with absolute positions
+        const axes = {
+          // X-axis (Red) - East/Right
+          x: liveGlobeViewer.entities.add({
+            polyline: {
+              positions: [aircraftPosition, xAxisEnd],
+              material: C.Color.RED.withAlpha(0.9),
+              width: 6,
+              followSurface: false,
+              clampToGround: false,
+              arcType: C.ArcType.NONE
+            }
+          }),
+          
+          // X-axis label
+          xLabel: liveGlobeViewer.entities.add({
+            position: xAxisEnd,
+            label: {
+              text: 'X (East/Right)',
+              font: '14pt sans-serif',
+              fillColor: C.Color.RED,
+              outlineColor: C.Color.BLACK,
+              outlineWidth: 2,
+              style: C.LabelStyle.FILL_AND_OUTLINE,
+              pixelOffset: new C.Cartesian2(10, 0),
+              disableDepthTestDistance: Number.POSITIVE_INFINITY,
+              scaleByDistance: new C.NearFarScalar(1000, 1.0, 10000, 0.5)
+            }
+          }),
+          
+          // Y-axis (Green) - North/Forward
+          y: liveGlobeViewer.entities.add({
+            polyline: {
+              positions: [aircraftPosition, yAxisEnd],
+              material: C.Color.LIME.withAlpha(0.9),
+              width: 6,
+              followSurface: false,
+              clampToGround: false,
+              arcType: C.ArcType.NONE
+            }
+          }),
+          
+          // Y-axis label
+          yLabel: liveGlobeViewer.entities.add({
+            position: yAxisEnd,
+            label: {
+              text: 'Y (North/Forward)',
+              font: '14pt sans-serif',
+              fillColor: C.Color.LIME,
+              outlineColor: C.Color.BLACK,
+              outlineWidth: 2,
+              style: C.LabelStyle.FILL_AND_OUTLINE,
+              pixelOffset: new C.Cartesian2(10, 0),
+              disableDepthTestDistance: Number.POSITIVE_INFINITY,
+              scaleByDistance: new C.NearFarScalar(1000, 1.0, 10000, 0.5)
+            }
+          }),
+          
+          // Z-axis (Blue) - Up
+          z: liveGlobeViewer.entities.add({
+            polyline: {
+              positions: [aircraftPosition, zAxisEnd],
+              material: C.Color.BLUE.withAlpha(0.9),
+              width: 6,
+              followSurface: false,
+              clampToGround: false,
+              arcType: C.ArcType.NONE
+            }
+          }),
+          
+          // Z-axis label
+          zLabel: liveGlobeViewer.entities.add({
+            position: zAxisEnd,
+            label: {
+              text: 'Z (Up)',
+              font: '14pt sans-serif',
+              fillColor: C.Color.BLUE,
+              outlineColor: C.Color.BLACK,
+              outlineWidth: 2,
+              style: C.LabelStyle.FILL_AND_OUTLINE,
+              pixelOffset: new C.Cartesian2(10, 0),
+              disableDepthTestDistance: Number.POSITIVE_INFINITY,
+              scaleByDistance: new C.NearFarScalar(1000, 1.0, 10000, 0.5)
+            }
+          })
+        };
+        
+        // Store debug axes
+        live3DDebugAxes.set(callsign, axes);
+      }
+      
+      // Function to remove 3D debug axes
+      function remove3DDebugAxes(callsign) {
+        const axes = live3DDebugAxes.get(callsign);
+        if (axes && liveGlobeViewer) {
+          // Remove all axis entities (lines and labels)
+          Object.values(axes).forEach(entity => {
+            try {
+              if (entity && liveGlobeViewer.entities.contains(entity)) {
+                liveGlobeViewer.entities.remove(entity);
+              }
+            } catch(e) {
+              console.warn('Error removing debug axis entity:', e);
+            }
+          });
+          live3DDebugAxes.delete(callsign);
+        }
+      }
+      
+      // Function to toggle debug mode for all aircraft
+      function toggleDebugAxes() {
+        debugAxes = !debugAxes;
+        
+        if (debugAxes) {
+          // Create debug axes for all existing aircraft
+          live3DEntities.forEach((entity, callsign) => {
+            try {
+              create3DDebugAxes(callsign, entity.position, entity.orientation);
+            } catch(e) {
+              console.warn('Failed to create debug axes for', callsign, e);
+            }
+          });
+        } else {
+          // Remove all debug axes
+          live3DDebugAxes.forEach((axes, callsign) => {
+            remove3DDebugAxes(callsign);
+          });
+        }
+        
+        // Update button state
+        const debugBtn = document.getElementById('live_debug3d');
+        if (debugBtn) {
+          debugBtn.textContent = debugAxes ? 'Debug: ON' : 'Debug Info';
+          debugBtn.classList.toggle('active', debugAxes);
+        }
+        
+        pushEvent(debugAxes ? 'Debug axes enabled' : 'Debug axes disabled');
+      }
+      
       // ensureLiveGlobe is now handled by the Globe3D class wrapper above
       
       // Function to update terrain provider dynamically
@@ -3939,7 +4124,13 @@ INDEX_HTML = """
         if (live3DEntities) live3DEntities.clear();
         if (live3DPaths) live3DPaths.clear();
         if (live3DTrackData) live3DTrackData.clear();
-        if (live3DDebugAxes) live3DDebugAxes.clear();
+        
+        // Clear debug axes
+        if (live3DDebugAxes) {
+          live3DDebugAxes.forEach((axes, callsign) => {
+            remove3DDebugAxes(callsign);
+          });
+        }
         
         // Clear telemetry display
         const telemetryElements = ['lv_alt', 'lv_spd', 'lv_vsi', 'lv_hdg', 'lv_pitch', 'lv_roll'];
@@ -4773,6 +4964,18 @@ INDEX_HTML = """
           // Update existing aircraft using Globe3D API
           await liveGlobe.updateAircraft(cs, position);
           
+          // Update debug axes if debug mode is active
+          if (debugAxes && live3DDebugAxes.has(cs)) {
+            const entity = liveGlobe.entities.get(cs);
+            if (entity) {
+              try { 
+                create3DDebugAxes(cs, entity.position, entity.orientation); 
+              } catch(e) {
+                console.warn('Failed to update debug axes for', cs, e);
+              }
+            }
+          }
+          
           // Update flight trail data for backward compatibility
           const trackData = live3DTrackData.get(cs);
           if (trackData) {
@@ -4926,6 +5129,25 @@ INDEX_HTML = """
         saveRecentChannel(channel, key);
         return originalConnectWs();
       };
+
+      // Live 3D control button event listeners
+      const liveHome3DBtn = document.getElementById('live_home3d');
+      if (liveHome3DBtn) {
+        liveHome3DBtn.addEventListener('click', () => {
+          if (liveGlobeViewer) {
+            // Reset camera to home view
+            liveGlobeViewer.camera.setView({
+              destination: Cesium.Cartesian3.fromDegrees(8.2, 46.8, 2000000) // Switzerland overview
+            });
+            pushEvent('Camera reset to home view');
+          }
+        });
+      }
+
+      const liveDebug3DBtn = document.getElementById('live_debug3d');
+      if (liveDebug3DBtn) {
+        liveDebug3DBtn.addEventListener('click', toggleDebugAxes);
+      }
 
       // Auto-connect on page load
       document.addEventListener('DOMContentLoaded', () => {
