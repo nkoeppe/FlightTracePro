@@ -4070,7 +4070,7 @@ INDEX_HTML = """
                     weight: 3, 
                     opacity: 0.7,
                     bubblingMouseEvents: false
-                  }).addTo(liveMap);
+                  }).addTo(liveMap2D.map);
                   
                   // Create invisible wider polyline for better hover detection - AWESOME for historical tracks too!
                   const hoverLine = L.polyline(positions, { 
@@ -4079,7 +4079,7 @@ INDEX_HTML = """
                     opacity: 0,
                     interactive: true,
                     bubblingMouseEvents: false
-                  }).addTo(liveMap);
+                  }).addTo(liveMap2D.map);
                   
                   // Function to find closest track point and show tooltip - SUPER NICE for history!
                   function showHistoricalTooltip(e) {
@@ -4088,7 +4088,7 @@ INDEX_HTML = """
                     let minDistance = Infinity;
                     
                     unique.forEach(point => {
-                      const distance = liveMap.distance(e.latlng, point.pos);
+                      const distance = liveMap2D.distance(e.latlng, point.pos);
                       if (distance < minDistance) {
                         minDistance = distance;
                         closestPoint = point;
@@ -4215,7 +4215,7 @@ INDEX_HTML = """
               const marker = liveMarkers.get(cs);
               if (marker) {
                 const pos = marker.getLatLng();
-                liveMap.flyTo(pos, Math.max(12, liveMap.getZoom()));
+                liveMap2D.flyTo(pos, Math.max(12, liveMap2D.getZoom()));
               }
             } else {
               liveFollow2D = false;
@@ -4289,7 +4289,7 @@ INDEX_HTML = """
         lastUpdateTime.set(cs, now);
         
         // Ensure live map is initialized
-        if (!liveMap) {
+        if (!liveMap2D) {
           ensureLiveMap().then(() => updateLivePosition(sample));
           return;
         }
@@ -4315,8 +4315,8 @@ INDEX_HTML = """
         // Handle 2D following
         if (liveFollowCS === cs && liveFollow2D) {
           try {
-            const targetZoom = Math.max(12, liveMap.getZoom());
-            liveMap.flyTo(pos, targetZoom, { animate: true, duration: 0.3 });
+            const targetZoom = Math.max(12, liveMap2D.getZoom());
+            liveMap2D.flyTo(pos, targetZoom, { animate: true, duration: 0.3 });
           } catch(e) {
             console.error('Follow error:', e);
           }
@@ -4390,7 +4390,7 @@ INDEX_HTML = """
 
         // Update 2D marker - optimized for performance
         if (!liveMarkers.has(cs)) {
-          const marker = L.marker(pos, { icon: icon }).addTo(liveMap);
+          const marker = L.marker(pos, { icon: icon }).addTo(liveMap2D.map);
           marker.bindTooltip(tooltipContent, { 
             maxWidth: 320,
             className: 'aircraft-tooltip',
@@ -4415,7 +4415,7 @@ INDEX_HTML = """
             opacity: 0.7,
             bubblingMouseEvents: false
           });
-          if (pathLine) pathLine.addTo(liveMap);
+          if (pathLine) pathLine.addTo(liveMap2D.map);
           
           // Create invisible wider polyline for better hover detection - this is AWESOME!
           const hoverLine = L.polyline([pos], { 
@@ -4425,7 +4425,7 @@ INDEX_HTML = """
             interactive: true,
             bubblingMouseEvents: false
           });
-          if (hoverLine) hoverLine.addTo(liveMap);
+          if (hoverLine) hoverLine.addTo(liveMap2D.map);
           
           // Function to find closest track point and show tooltip - SUPER NICE feature!
           function showTrackTooltip(e) {
@@ -4435,7 +4435,7 @@ INDEX_HTML = """
               let minDistance = Infinity;
               
               trackData.forEach(point => {
-                const distance = liveMap.distance(e.latlng, point.pos);
+                const distance = liveMap2D.distance(e.latlng, point.pos);
                 if (distance < minDistance) {
                   minDistance = distance;
                   closestPoint = point;
@@ -4498,7 +4498,7 @@ INDEX_HTML = """
             liveFollowCS = cs;
             liveFollow2D = true;
             updateFollowBtn();
-            liveMap.flyTo(e.latlng, Math.max(12, liveMap.getZoom()));
+            liveMap2D.flyTo(e.latlng, Math.max(12, liveMap2D.getZoom()));
             pushEvent(`Following ${cs} from track`);
           });
           
@@ -4539,7 +4539,7 @@ INDEX_HTML = """
               // Check for large jumps (teleportation)
               if (currentPath.length > 0) {
                 const lastPos = currentPath[currentPath.length - 1];
-                const distance = liveMap.distance(lastPos, pos);
+                const distance = liveMap2D.distance(lastPos, pos);
                 if (distance > 20000) { // 20km jump
                   pathLine.setLatLngs([pos]);
                   if (hoverLine) hoverLine.setLatLngs([pos]);
@@ -4583,8 +4583,8 @@ INDEX_HTML = """
           liveFollowCS = cs;
           try {
             // Use setView for immediate positioning, maintaining current zoom
-            const currentZoom = liveMap.getZoom();
-            liveMap.setView(pos, Math.max(currentZoom, 12), { animate: true, duration: 0.5 });
+            const currentZoom = liveMap2D.getZoom();
+            liveMap2D.setView(pos, Math.max(currentZoom, 12));
           } catch(e) {
             console.error('Follow error:', e);
           }
@@ -4668,7 +4668,7 @@ INDEX_HTML = """
         }
         
         // Ensure live map is initialized
-        if (!liveMap) {
+        if (!liveMap2D) {
           ensureLiveMap().then(() => renderActual2DPositionSimple(cs, pos));
           return;
         }
@@ -4694,7 +4694,7 @@ INDEX_HTML = """
           });
           
           marker = L.marker(pos, { icon: icon })
-            .addTo(liveMap)
+            .addTo(liveMap2D.map)
             .bindTooltip(`<div class="aircraft-telemetry-tooltip"><div class="aircraft-callsign">${cs}</div></div>`, {
               permanent: false,
               direction: 'top',
@@ -4717,7 +4717,7 @@ INDEX_HTML = """
             opacity: 0.8
           });
           if (pathLine) {
-            pathLine.addTo(liveMap);
+            pathLine.addTo(liveMap2D.map);
             livePaths.set(cs, pathLine);
           }
         } else {
