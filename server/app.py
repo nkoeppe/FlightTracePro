@@ -3036,7 +3036,7 @@ INDEX_HTML = """
             orientation: C.Transforms.headingPitchRollQuaternion(
               pos,
               C.HeadingPitchRoll.fromDegrees(
-                (orientation.hdg || 0), // NO ROTATION - showing raw model orientation
+                (orientation.hdg || 0) + 180, // Add 180 degrees to flip aircraft around
                 orientation.pitch || 0, 
                 orientation.roll || 0
               )
@@ -3124,7 +3124,7 @@ INDEX_HTML = """
           entity.orientation = C.Transforms.headingPitchRollQuaternion(
             pos,
             C.HeadingPitchRoll.fromDegrees(
-              (orientation.hdg || 0), // NO ROTATION - showing raw model orientation
+              (orientation.hdg || 0) + 180, // Add 180 degrees to flip aircraft around
               orientation.pitch || 0, 
               orientation.roll || 0
             )
@@ -3630,11 +3630,26 @@ INDEX_HTML = """
         // Create axis length (in meters)
         const axisLength = 100.0;
         
-        // Create a simple ENU (East-North-Up) coordinate system to see raw model orientation
-        // This will show us what the model SHOULD be oriented to
-        const transform = C.Transforms.eastNorthUpToFixedFrame(aircraftPosition);
+        // Get the aircraft's actual heading (the one being used for orientation)
+        // This will help us see what coordinate system the model is being oriented to
+        let heading = 0;
         
-        // Calculate axis end points in world coordinates (no model rotation applied)
+        // Try to get heading from the last aircraft update
+        const recentSamples = liveTrackData.get(callsign);
+        if (recentSamples && recentSamples.length > 0) {
+          const lastSample = recentSamples[recentSamples.length - 1];
+          if (lastSample.data && typeof lastSample.data.hdg_deg === 'number') {
+            heading = lastSample.data.hdg_deg;
+          }
+        }
+        
+        // Create transform based on the aircraft's reported heading
+        const transform = C.Transforms.headingPitchRollToFixedFrame(
+          aircraftPosition,
+          C.HeadingPitchRoll.fromDegrees(heading, 0, 0)
+        );
+        
+        // Calculate axis end points based on MOTION direction
         const xAxisEnd = C.Matrix4.multiplyByPoint(transform, new C.Cartesian3(axisLength, 0, 0), new C.Cartesian3());
         const yAxisEnd = C.Matrix4.multiplyByPoint(transform, new C.Cartesian3(0, axisLength, 0), new C.Cartesian3());
         const zAxisEnd = C.Matrix4.multiplyByPoint(transform, new C.Cartesian3(0, 0, axisLength), new C.Cartesian3());
@@ -3657,7 +3672,7 @@ INDEX_HTML = """
           xLabel: liveGlobeViewer.entities.add({
             position: xAxisEnd,
             label: {
-              text: 'X SHOULD = RIGHT WING/MOTION',
+              text: 'X = HEADING-BASED RIGHT',
               font: '14pt sans-serif',
               fillColor: C.Color.RED,
               outlineColor: C.Color.BLACK,
@@ -3685,7 +3700,7 @@ INDEX_HTML = """
           yLabel: liveGlobeViewer.entities.add({
             position: yAxisEnd,
             label: {
-              text: 'Y SHOULD = NOSE/FORWARD',
+              text: 'Y = HEADING-BASED FORWARD',
               font: '14pt sans-serif',
               fillColor: C.Color.LIME,
               outlineColor: C.Color.BLACK,

@@ -949,9 +949,9 @@ copy /Y %NEW_EXE% %TARGET_EXE% >nul 2>&1
 REM Verify the copy worked by checking if file exists and has correct size
 if exist %TARGET_EXE% (
     echo [%date% %time%] Copy appeared successful, verifying file... >> %LOGFILE%
-    REM Compare file sizes to ensure copy was complete
-    for %%A in (%NEW_EXE%) do set NEWSIZE=%%~zA
-    for %%B in (%TARGET_EXE%) do set CURSIZE=%%~zB
+    REM Compare file sizes to ensure copy was complete (handle quotes safely)
+    for %%A in ("%NEW_NOQUOTE%") do set NEWSIZE=%%~zA
+    for %%B in ("%TARGET_NOQUOTE%") do set CURSIZE=%%~zB
     
     if "!NEWSIZE!"=="!CURSIZE!" (
         echo [%date% %time%] File sizes match - update successful! >> %LOGFILE%
@@ -995,7 +995,7 @@ if !UPDATE_RETRY! LSS 20 (
     echo 3. Replace the executable manually
     echo.
     echo Restoring backup...
-    copy "{cur}.backup" "{cur}" >nul 2>&1
+    copy "%BACKUP_EXE%" %TARGET_EXE% >nul 2>&1
     echo Backup restored.
     pause
     exit /b 1
@@ -1014,7 +1014,9 @@ timeout /t 2 /nobreak >nul
 
 echo Starting: %TARGET_EXE%
 echo [%date% %time%] Starting: %TARGET_EXE% >> %LOGFILE%
-start "" %TARGET_EXE%
+REM Determine target directory and start app with correct working directory
+for %%I in ("%TARGET_NOQUOTE%") do set TARGET_DIR=%%~dpI
+start "" /D "%TARGET_DIR%" %TARGET_EXE%
 if errorlevel 1 (
     echo [%date% %time%] ERROR: Failed to start application >> %LOGFILE%
     echo ERROR: Failed to start application!
@@ -1031,7 +1033,8 @@ timeout /t 3 /nobreak >nul
 
 REM Self-delete (but keep log file for debugging)
 echo [%date% %time%] Self-deleting batch file... >> %LOGFILE%
-del "%~f0" >nul 2>&1
+REM Delete asynchronously to avoid "batch file cannot be found" console noise
+start "" /b cmd /c del /f /q "%~f0" >nul 2>&1
 """)
             
             self.append_log(f"[update] Created batch file: {bat}")
