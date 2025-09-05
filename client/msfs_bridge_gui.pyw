@@ -1016,6 +1016,18 @@ echo Starting: %TARGET_EXE%
 echo [%date% %time%] Starting: %TARGET_EXE% >> %LOGFILE%
 REM Determine target directory and start app with correct working directory
 for %%I in ("%TARGET_NOQUOTE%") do set TARGET_DIR=%%~dpI
+REM Clear potential Python environment variables that can break PyInstaller child
+set PYTHONHOME=
+set PYTHONPATH=
+set PYTHONNOUSERSITE=
+set VIRTUAL_ENV=
+set CONDA_PREFIX=
+set __PYVENV_LAUNCHER__=
+
+REM Small delay to allow AV/indexer to release the new EXE
+timeout /t 2 /nobreak >nul
+
+REM Start application with explicit working directory
 start "" /D "%TARGET_DIR%" %TARGET_EXE%
 if errorlevel 1 (
     echo [%date% %time%] ERROR: Failed to start application >> %LOGFILE%
@@ -1023,7 +1035,22 @@ if errorlevel 1 (
     pause
     exit /b 1
 ) else (
-    echo [%date% %time%] Application started successfully >> %LOGFILE%
+    echo [%date% %time%] First start command issued >> %LOGFILE%
+)
+
+REM Verify process is running, retry once if not
+for %%I in ("%TARGET_NOQUOTE%") do set EXE_NAME=%%~nxI
+timeout /t 2 /nobreak >nul
+tasklist /FI "IMAGENAME eq %EXE_NAME%" | find /I "%EXE_NAME%" >nul
+if errorlevel 1 (
+    echo [%date% %time%] Process not detected; retrying start after AV settle... >> %LOGFILE%
+    timeout /t 4 /nobreak >nul
+    start "" /D "%TARGET_DIR%" %TARGET_EXE%
+    if errorlevel 1 (
+        echo [%date% %time%] ERROR: Retry start failed >> %LOGFILE%
+    ) else (
+        echo [%date% %time%] Retry start command issued >> %LOGFILE%
+    )
 )
 
 echo.

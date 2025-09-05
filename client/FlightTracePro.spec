@@ -3,20 +3,20 @@
 import sys
 import os
 from pathlib import Path
+from PyInstaller.utils.hooks import collect_data_files
 
 block_cipher = None
 
-# Get the current directory (client folder)
-client_dir = Path(__file__).parent
+# Get the current directory (client folder). In spec files, use SPECPATH.
+client_dir = Path(globals().get('SPECPATH', '.'))
+
+data_files = collect_data_files('certifi')
 
 a = Analysis(
     [str(client_dir / 'msfs_bridge_gui.pyw')],
     pathex=[str(client_dir)],
     binaries=[],
-    datas=[
-        # Include certifi certificates for HTTPS requests
-        ('certifi', 'certifi'),
-    ],
+    datas=data_files,
     hiddenimports=[
         'SimConnect',
         'websockets',

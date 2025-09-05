@@ -3037,8 +3037,8 @@ INDEX_HTML = """
               pos,
               C.HeadingPitchRoll.fromDegrees(
                 (orientation.hdg || 0) + 180, // Add 180 degrees to flip aircraft around
-                orientation.pitch || 0, 
-                orientation.roll || 0
+                -(orientation.pitch || 0), // Negative pitch to match aviation convention (nose up = positive)
+                -(orientation.roll || 0)   // Negative roll to match aviation convention (right roll = positive)
               )
             ),
             model: {
@@ -3124,9 +3124,9 @@ INDEX_HTML = """
           entity.orientation = C.Transforms.headingPitchRollQuaternion(
             pos,
             C.HeadingPitchRoll.fromDegrees(
-              (orientation.hdg || 0) + 180, // Add 180 degrees to flip aircraft around
-              orientation.pitch || 0, 
-              orientation.roll || 0
+              (orientation.hdg || 0) + 270, // Add 270 degrees to orient nose forward
+              -(orientation.pitch || 0), // Negative pitch to match aviation convention (nose up = positive)
+              -(orientation.roll || 0)   // Negative roll to match aviation convention (right roll = positive)
             )
           );
           
@@ -4963,10 +4963,22 @@ INDEX_HTML = """
           alt: cartographic.height
         };
         
+        // Get latest orientation data from stored track data
+        let orientation = { hdg: 0, pitch: 0, roll: 0 };
+        const trackData = liveTrackData.get(cs);
+        if (trackData && trackData.length > 0) {
+          const latestData = trackData[trackData.length - 1].data;
+          orientation = {
+            hdg: latestData.hdg_deg || 0,
+            pitch: latestData.pitch_deg || 0,
+            roll: latestData.roll_deg || 0
+          };
+        }
+        
         // Check if aircraft exists in Globe3D component
         if (!liveGlobe.entities.has(cs)) {
-          // Create new aircraft using Globe3D API
-          await liveGlobe.addAircraft(cs, position, {}, cs);
+          // Create new aircraft using Globe3D API with initial orientation
+          await liveGlobe.addAircraft(cs, position, orientation, cs);
           // Keep backward compatibility references
           live3DEntities.set(cs, liveGlobe.entities.get(cs));
           live3DTrackData.set(cs, [{position: pos, timestamp: now}]);
@@ -4977,8 +4989,8 @@ INDEX_HTML = """
             try { create3DDebugAxes(cs, entity.position, entity.orientation); } catch(_) {}
           }
         } else {
-          // Update existing aircraft using Globe3D API
-          await liveGlobe.updateAircraft(cs, position);
+          // Update existing aircraft using Globe3D API with orientation
+          await liveGlobe.updateAircraft(cs, position, orientation);
           
           // Update debug axes if debug mode is active
           if (debugAxes && live3DDebugAxes.has(cs)) {
