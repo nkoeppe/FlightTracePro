@@ -2430,11 +2430,45 @@ INDEX_HTML = """
           const isValidLL = (lat, lon) => isFiniteNum(lat) && isFiniteNum(lon) && Math.abs(lat) <= 90 && Math.abs(lon) <= 180;
           const safeAddPolyline = (latlngs, opts) => {
             try {
-              const clean = (latlngs || []).filter(ll => Array.isArray(ll) && isValidLL(ll[0], ll[1]));
+              if (!latlngs || !Array.isArray(latlngs)) return null;
+              
+              // More robust coordinate validation
+              const clean = latlngs.filter(ll => {
+                if (!Array.isArray(ll) || ll.length < 2) return false;
+                const lat = ll[0], lon = ll[1];
+                return isValidLL(lat, lon) && 
+                       !isNaN(lat) && !isNaN(lon) && 
+                       isFinite(lat) && isFinite(lon);
+              });
+              
               if (clean.length < 2) return null;
+              
+              // Validate that coordinates won't cause bounds issues
+              const validCoords = clean.filter(ll => {
+                const lat = Number(ll[0]), lon = Number(ll[1]);
+                return lat >= -85.0511 && lat <= 85.0511 && // Mercator projection limits
+                       lon >= -180 && lon <= 180;
+              });
+              
+              if (validCoords.length < 2) return null;
+              
               const baseOpts = { interactive: false };
               if (canvasRenderer) baseOpts.renderer = canvasRenderer;
-              const pl = L.polyline(clean, Object.assign(baseOpts, opts || {}));
+              
+              const pl = L.polyline(validCoords, Object.assign(baseOpts, opts || {}));
+              
+              // Validate polyline bounds before adding to layer
+              try {
+                const bounds = pl.getBounds();
+                if (!bounds || !bounds.isValid()) {
+                  console.warn('Invalid polyline bounds, skipping');
+                  return null;
+                }
+              } catch (boundsError) {
+                console.warn('Error getting polyline bounds:', boundsError);
+                return null;
+              }
+              
               trackLayer.addLayer(pl);
               return pl;
             } catch (e) {
@@ -3321,6 +3355,9 @@ INDEX_HTML = """
       let liveFollow2D = false;
       let liveFollow3D = false;
       let liveFollowCS = null;
+
+      // Helper function for coordinate validation
+      const isFiniteNum = (n) => typeof n === 'number' && Number.isFinite(n);
 
       // Live map variables
       let liveMap = null, liveLeafletReady = null;

@@ -398,11 +398,13 @@ class MainWindow(QMainWindow):
         logControls = QVBoxLayout()
         self.logLevel = QComboBox(); self.logLevel.addItems(["DEBUG","INFO","WARN","ERROR"]); self.logLevel.setCurrentText("INFO"); logControls.addWidget(self.logLevel)
         self.btnClearLogs = QPushButton("Clear Logs"); logControls.addWidget(self.btnClearLogs)
+        self.btnTestUpdate = QPushButton("Test Update"); self.btnTestUpdate.setToolTip("Test update mechanism with fake update"); logControls.addWidget(self.btnTestUpdate)
         logControlsWidget = QWidget(); logControlsWidget.setLayout(logControls)
         lay.addWidget(logControlsWidget, row, 3); row += 1
         
         self.logLevel.currentTextChanged.connect(self.on_level_changed)
         self.btnClearLogs.clicked.connect(self.clear_logs)
+        self.btnTestUpdate.clicked.connect(self.test_update_mechanism)
 
         self.btnConnect.clicked.connect(self.on_connect)
         self.btnDisconnect.clicked.connect(self.on_disconnect)
@@ -655,6 +657,145 @@ class MainWindow(QMainWindow):
         t = threading.Thread(target=self._download_and_install, args=(version, download_url), daemon=True)
         t.start()
     
+    def test_update_mechanism(self):
+        """Test the update mechanism with the current executable"""
+        import os, sys, tempfile, shutil
+        
+        self.append_log("[test] Testing update mechanism...")
+        
+        if not getattr(sys, 'frozen', False):
+            self.append_log("[test] Not running as frozen executable - test not applicable")
+            return
+            
+        try:
+            # Create fake "new" version by copying current exe
+            cur = os.path.abspath(sys.executable)
+            tmpdir = tempfile.gettempdir()
+            newexe = os.path.join(tmpdir, 'FlightTracePro_test.exe')
+            
+            self.append_log(f"[test] Current exe: {cur}")
+            self.append_log(f"[test] Test exe: {newexe}")
+            
+            # Copy current exe as test update
+            shutil.copy2(cur, newexe)
+            self.append_log(f"[test] Created test update file")
+            
+            # Create test batch file
+            bat = os.path.join(tmpdir, 'flighttracepro_test_update.bat')
+            log_file = os.path.join(tmpdir, 'flighttracepro_test_update.log')
+            
+            with open(bat, 'w') as bf:
+                bf.write(f"""@echo off
+title FlightTracePro Test Updater
+set LOGFILE="{log_file}"
+
+echo [%date% %time%] FlightTracePro TEST Auto-Updater Started >> "%LOGFILE%"
+echo [%date% %time%] Target: {cur} >> "%LOGFILE%"
+echo [%date% %time%] New EXE: {newexe} >> "%LOGFILE%"
+
+echo.
+echo ========================================
+echo FlightTracePro TEST Auto-Updater
+echo ========================================
+echo.
+echo This is a TEST - no actual update will occur
+echo Log file: %LOGFILE%
+echo.
+
+echo Step 1: Waiting for application to close...
+echo [%date% %time%] Step 1: Waiting for app to close... >> "%LOGFILE%"
+timeout /t 2 /nobreak >nul
+
+echo Step 2: TEST - Would create backup here...
+echo [%date% %time%] Step 2: TEST backup creation >> "%LOGFILE%"
+
+echo Step 3: TEST - Would install new version here...
+echo [%date% %time%] Step 3: TEST installation >> "%LOGFILE%"
+
+echo Step 4: TEST - Would clean up here...
+echo [%date% %time%] Step 4: TEST cleanup >> "%LOGFILE%"
+
+echo Step 5: Restarting application...
+echo [%date% %time%] Step 5: Restarting application... >> "%LOGFILE%"
+timeout /t 2 /nobreak >nul
+
+echo Starting: "{cur}"
+echo [%date% %time%] Starting: {cur} >> "%LOGFILE%"
+start "" "{cur}"
+
+echo.
+echo TEST UPDATE COMPLETE! Application should restart now.
+echo [%date% %time%] TEST update process completed >> "%LOGFILE%"
+timeout /t 3 /nobreak >nul
+
+REM Cleanup test files
+echo [%date% %time%] Cleaning up test files... >> "%LOGFILE%"
+del "{newexe}" >nul 2>&1
+del "%~f0" >nul 2>&1
+""")
+            
+            self.append_log(f"[test] Created test batch file: {bat}")
+            self.append_log(f"[test] Test log will be: {log_file}")
+            
+            # Now test the same launch mechanism as the real updater
+            launched = False
+            
+            # Method 1: subprocess
+            try:
+                import subprocess
+                self.append_log(f"[test] Testing subprocess launch...")
+                
+                if hasattr(subprocess, 'CREATE_NEW_CONSOLE'):
+                    proc = subprocess.Popen(
+                        [bat],
+                        shell=False,
+                        creationflags=subprocess.CREATE_NEW_CONSOLE | subprocess.DETACHED_PROCESS,
+                        cwd=os.path.dirname(bat),
+                        stdin=subprocess.DEVNULL,
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL
+                    )
+                else:
+                    proc = subprocess.Popen([bat], shell=True, cwd=os.path.dirname(bat))
+                
+                self.append_log(f"[test] Subprocess started with PID: {proc.pid}")
+                launched = True
+            except Exception as e:
+                self.append_log(f"[test] Subprocess failed: {e}")
+                
+                # Try cmd wrapper
+                try:
+                    proc = subprocess.Popen(
+                        ['cmd.exe', '/c', 'start', '/min', bat],
+                        shell=False,
+                        creationflags=subprocess.DETACHED_PROCESS if hasattr(subprocess, 'DETACHED_PROCESS') else 0,
+                        cwd=os.path.dirname(bat)
+                    )
+                    self.append_log(f"[test] CMD wrapper started with PID: {proc.pid}")
+                    launched = True
+                except Exception as cmd_error:
+                    self.append_log(f"[test] CMD wrapper failed: {cmd_error}")
+            
+            # Method 2: os.startfile
+            if not launched:
+                try:
+                    os.startfile(bat)
+                    self.append_log(f"[test] Started with os.startfile")
+                    launched = True
+                except Exception as e:
+                    self.append_log(f"[test] os.startfile failed: {e}")
+            
+            if launched:
+                self.append_log(f"[test] Test batch launched successfully!")
+                self.append_log(f"[test] Check console window and log file: {log_file}")
+                self.append_log(f"[test] Application will restart in test mode")
+            else:
+                self.append_log(f"[test] All launch methods failed!")
+                self.append_log(f"[test] Try running manually: {bat}")
+                
+        except Exception as e:
+            self.append_log(f"[test] Test failed: {e}")
+
     def _download_and_install(self, version, url):
         """Download and install update"""
         try:
