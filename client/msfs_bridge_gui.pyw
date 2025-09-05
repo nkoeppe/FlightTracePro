@@ -190,6 +190,20 @@ class BridgeWorker(QThread):
 
     def stop(self):
         self._stop.set()
+    
+    def cleanup(self):
+        """Clean up the worker thread properly"""
+        self.stop()
+        if self.isRunning():
+            self.wait(2000)  # Wait up to 2 seconds
+        
+        # Disconnect all signals
+        try:
+            self.status.disconnect()
+            self.connected.disconnect()
+            self.log.disconnect()
+        except:
+            pass
 
     @Slot(str)
     def set_level(self, level: str):
@@ -354,6 +368,8 @@ class BridgeWorker(QThread):
 class MainWindow(QMainWindow):
     # Signal for update notifications from background thread
     update_info_signal = Signal(str, str)  # version, download_url
+    # Signal for deferred update processing from main thread
+    deferred_update_signal = Signal()
     
     def __init__(self):
         super().__init__()
@@ -382,7 +398,7 @@ class MainWindow(QMainWindow):
 
         lay.addWidget(QLabel("Rate (Hz)"), row, 0)
         self.rate = QSpinBox(); self.rate.setRange(1, 30); self.rate.setValue(10); lay.addWidget(self.rate, row, 1)
-        self.status = QLabel("disconnected"); self.status.setAlignment(Qt.AlignRight | Qt.AlignVCenter); lay.addWidget(self.status, row, 2, 1, 2); row += 1
+        self.status = QLabel("disconnected"); self.status.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter); lay.addWidget(self.status, row, 2, 1, 2); row += 1
 
         btns = QHBoxLayout()
         self.demoBtn = QPushButton("Demo Mode: Off"); self.demoBtn.setCheckable(True); self.demoBtn.clicked.connect(lambda: self.demoBtn.setText(f"Demo Mode: {'On' if self.demoBtn.isChecked() else 'Off'}")); btns.addWidget(self.demoBtn)
@@ -428,18 +444,38 @@ class MainWindow(QMainWindow):
         self.tray.activated.connect(self._on_tray)
         self.tray.show()
 
-        # Connect update signal
+        # Connect update signals
         self.update_info_signal.connect(self._show_update_prompt)
-
-        # Auto-update check (best-effort)
-        try:
-            self.check_update_async()
-        except Exception:
-            pass
+        self.deferred_update_signal.connect(self.check_for_deferred_update)
 
         # Recents storage
         self.settings = QSettings("FlightTracePro", "Bridge")
         self.load_recents()
+        
+        # Check for deferred updates first, then auto-update if no deferred update
+        from PySide6.QtCore import QTimer
+        QTimer.singleShot(1000, self.check_startup_updates)
+    
+    def check_startup_updates(self):
+        """Check for deferred updates first, then auto-updates if none pending"""
+        self.append_log("[update] Checking for updates on startup...")
+        
+        # First check for deferred updates
+        import os, tempfile
+        tmpdir = tempfile.gettempdir()
+        marker_file = os.path.join(tmpdir, 'flighttracepro_deferred_update.marker')
+        
+        if os.path.exists(marker_file):
+            self.append_log("[update] Deferred update found, processing...")
+            # Use signal to ensure GUI thread execution
+            self.deferred_update_signal.emit()
+        else:
+            self.append_log("[update] No deferred update, checking for new updates...")
+            # Auto-update check (best-effort) - only if no deferred update
+            try:
+                self.check_update_async()
+            except Exception:
+                pass
 
     def _on_tray(self, reason):
         if reason == QSystemTrayIcon.Trigger:
@@ -479,6 +515,14 @@ class MainWindow(QMainWindow):
                 # Cancel - do nothing
                 e.ignore()
     
+    def __del__(self):
+        """Destructor to ensure cleanup"""
+        try:
+            if hasattr(self, 'worker') and self.worker:
+                self.worker.cleanup()
+        except:
+            pass
+    
     def _minimize_to_tray(self):
         """Minimize to tray with notification"""
         self.hide()
@@ -496,13 +540,28 @@ class MainWindow(QMainWindow):
         """Properly quit the application"""
         # Stop worker if running
         if self.worker:
-            self.worker.stop()
-            self.worker.wait(1000)
+            self.worker.cleanup()
             self.worker = None
+        
+        # Disconnect all signals to prevent thread storage issues
+        try:
+            self.update_info_signal.disconnect()
+            self.deferred_update_signal.disconnect()
+        except:
+            pass
         
         # Hide tray icon
         if self.tray:
             self.tray.hide()
+        
+        # Process pending events before cleanup
+        QApplication.processEvents()
+        
+        # Force cleanup of Qt objects
+        self.deleteLater()
+        
+        # Process events again to handle deleteLater
+        QApplication.processEvents()
         
         # Quit application
         QApplication.quit()
@@ -540,8 +599,7 @@ class MainWindow(QMainWindow):
     @Slot()
     def on_disconnect(self):
         if self.worker:
-            self.worker.stop()
-            self.worker.wait(1000)
+            self.worker.cleanup()
             self.worker = None
         self.on_connected(False)
 
@@ -699,11 +757,19 @@ class MainWindow(QMainWindow):
                 numbers = re.findall(r'\d+', v)
                 return tuple(int(n) for n in numbers) if numbers else (0,)
             
+            def compare_versions(current, latest):
+                # Pad shorter version with zeros for proper comparison
+                # e.g., (0, 2) becomes (0, 2, 0) to compare with (0, 2, 27)
+                max_len = max(len(current), len(latest))
+                current_padded = current + (0,) * (max_len - len(current))
+                latest_padded = latest + (0,) * (max_len - len(latest))
+                return latest_padded > current_padded
+            
             current_version = parse(APP_VERSION)
             latest_version = parse(ver)
             self.append_log(f"[update] Current: {APP_VERSION} ({current_version}), Latest: {ver} ({latest_version})")
             
-            if latest_version <= current_version:
+            if not compare_versions(current_version, latest_version):
                 self.append_log(f"[update] ✅ Already up to date (v{APP_VERSION} is latest)")
                 return
             # find exe asset
@@ -726,17 +792,22 @@ class MainWindow(QMainWindow):
     
     def _show_update_prompt(self, version, download_url):
         """Show update prompt in main thread"""
-        from PySide6.QtWidgets import QMessageBox
-        ret = QMessageBox.information(self, 'Update Available', 
-                                    f'New version {version} available. Download and install now?', 
-                                    QMessageBox.Yes | QMessageBox.No)
-        if ret != QMessageBox.Yes:
-            return
+        # Show modern update dialog
+        dialog = UpdateDialog(version, download_url, self)
+        result = dialog.exec()
         
-        # Download and install in background thread
-        import threading
-        t = threading.Thread(target=self._download_and_install, args=(version, download_url), daemon=True)
-        t.start()
+        if result == UpdateDialog.UpdateAction.INSTALL_NOW:
+            # Download and install immediately
+            self.append_log("[update] User chose to install update now - starting download...")
+            import threading
+            t = threading.Thread(target=self._download_and_install, args=(version, download_url, False), daemon=True)
+            t.start()
+        elif result == UpdateDialog.UpdateAction.INSTALL_LATER:
+            # Download and defer restart
+            self.append_log("[update] User chose to install later - downloading for deferred installation...")
+            import threading
+            t = threading.Thread(target=self._download_and_install, args=(version, download_url, True), daemon=True)
+            t.start()
     
     def test_update_mechanism(self):
         """Test the update mechanism with the current executable"""
@@ -766,7 +837,7 @@ class MainWindow(QMainWindow):
             log_file = os.path.join(tmpdir, 'flighttracepro_test_update.log')
             
             with open(bat, 'w') as bf:
-                bf.write(fr"""@echo off
+                bf.write(f"""@echo off
 title FlightTracePro Test Updater
 
 REM Define paths as variables
@@ -800,22 +871,13 @@ echo [%date% %time%] Step 3: TEST installation >> %LOGFILE%
 echo Step 4: TEST - Would clean up here...
 echo [%date% %time%] Step 4: TEST cleanup >> %LOGFILE%
 
-echo Step 5: Test complete - asking about restart...
-echo [%date% %time%] Step 5: Test complete - asking about restart... >> %LOGFILE%
+echo Step 5: Test complete - restarting application...
+echo [%date% %time%] Step 5: Test complete - restarting application... >> %LOGFILE%
 
-REM Show restart dialog for test too
-powershell -Command "Add-Type -AssemblyName System.Windows.Forms; $result = [System.Windows.Forms.MessageBox]::Show('TEST update completed!`n`nThis was just a test. Restart anyway?', 'Test Complete', [System.Windows.Forms.MessageBoxButtons]::YesNo, [System.Windows.Forms.MessageBoxIcon]::Information); if ($result -eq 'Yes') {{ exit 1 }} else {{ exit 0 }}"
-
-if errorlevel 1 (
-    echo [%date% %time%] User chose to restart after test >> %LOGFILE%
-    echo Starting: %TARGET_EXE%
-    echo [%date% %time%] Starting: %TARGET_EXE% >> %LOGFILE%
-    start "" %TARGET_EXE%
-    echo TEST UPDATE COMPLETE! Application is restarting...
-) else (
-    echo [%date% %time%] User chose not to restart after test >> %LOGFILE%
-    echo TEST UPDATE COMPLETE! No restart needed.
-)
+echo Starting: %TARGET_EXE%
+echo [%date% %time%] Starting: %TARGET_EXE% >> %LOGFILE%
+start "" %TARGET_EXE%
+echo [%date% %time%] TEST UPDATE COMPLETE! Application restarted >> %LOGFILE%
 
 echo [%date% %time%] TEST update process completed >> %LOGFILE%
 
@@ -838,7 +900,7 @@ del "%~f0" >nul 2>&1
                 
                 if hasattr(subprocess, 'CREATE_NEW_CONSOLE'):
                     proc = subprocess.Popen(
-                        [bat],
+                        ['cmd.exe', '/c', bat],
                         shell=False,
                         creationflags=subprocess.CREATE_NEW_CONSOLE | subprocess.DETACHED_PROCESS,
                         cwd=os.path.dirname(bat),
@@ -847,7 +909,7 @@ del "%~f0" >nul 2>&1
                         stderr=subprocess.DEVNULL
                     )
                 else:
-                    proc = subprocess.Popen([bat], shell=True, cwd=os.path.dirname(bat))
+                    proc = subprocess.Popen(bat, shell=True, cwd=os.path.dirname(bat))
                 
                 self.append_log(f"[test] Subprocess started with PID: {proc.pid}")
                 launched = True
@@ -887,7 +949,7 @@ del "%~f0" >nul 2>&1
         except Exception as e:
             self.append_log(f"[test] Test failed: {e}")
 
-    def _download_and_install(self, version, url):
+    def _download_and_install(self, version, url, install_later=False):
         """Download and install update"""
         try:
             import os, sys, tempfile
@@ -925,64 +987,90 @@ del "%~f0" >nul 2>&1
             # Escape paths for Windows batch - replace problematic characters
             def batch_escape(path):
                 # Convert forward slashes to backslashes and wrap in quotes
-                return f'"{path.replace("/", "\\\\")}"'
+                return f'"{path.replace("/", "\\")}"'
             
             cur_safe = batch_escape(cur)
             newexe_safe = batch_escape(newexe)  
             log_safe = batch_escape(log_file)
             
-            with open(bat, 'w') as bf:
-                bf.write(fr"""@echo off
+            # Create enhanced batch file for better deferred update support
+            deferred_mode = "true" if install_later else "false"
+            
+            with open(bat, 'w', encoding='cp1252') as bf:
+                bf.write(f"""@echo off
 setlocal enabledelayedexpansion
-title FlightTracePro Updater
+title FlightTracePro Updater v{version}
 
-REM Define paths as variables
+REM Define paths as variables  
 set TARGET_EXE={cur_safe}
 set NEW_EXE={newexe_safe}
 set LOGFILE={log_safe}
+set DEFERRED_MODE={deferred_mode}
+set VERSION={version}
 
 REM Normalize paths for operations needing suffixes
 set TARGET_NOQUOTE=%TARGET_EXE:"=%
 set NEW_NOQUOTE=%NEW_EXE:"=%
 set BACKUP_EXE=%TARGET_NOQUOTE%.backup
 
-echo [%date% %time%] FlightTracePro Auto-Updater Started >> %LOGFILE%
+echo [%date% %time%] FlightTracePro Auto-Updater v%VERSION% Started >> %LOGFILE%
 echo [%date% %time%] Target: %TARGET_EXE% >> %LOGFILE%
 echo [%date% %time%] New EXE: %NEW_EXE% >> %LOGFILE%
+echo [%date% %time%] Deferred Mode: %DEFERRED_MODE% >> %LOGFILE%
 echo [%date% %time%] Batch: %~f0 >> %LOGFILE%
 
 echo.
 echo ========================================
-echo FlightTracePro Auto-Updater
+echo FlightTracePro Auto-Updater v%VERSION%
 echo ========================================
 echo.
+if "%DEFERRED_MODE%"=="true" (
+    echo Mode: Deferred Update ^(triggered by user restart^)
+) else (
+    echo Mode: Immediate Update ^(triggered by update check^)
+)
 echo Log file: %LOGFILE%
+echo.
 
 echo Step 1: Waiting for application to close...
 echo [%date% %time%] Step 1: Waiting for app to close... >> %LOGFILE%
-REM Quick check that process has exited
-timeout /t 1 /nobreak >nul
+if "%DEFERRED_MODE%"=="true" (
+    REM For deferred updates, wait a bit longer to ensure proper shutdown
+    echo Waiting for deferred update startup to complete...
+    timeout /t 3 /nobreak >nul
+) else (
+    REM Quick check that process has exited for immediate updates
+    timeout /t 1 /nobreak >nul
+)
 
-echo Step 2: File system ready
-echo [%date% %time%] Step 2: File system ready >> %LOGFILE%
+echo Step 2: Verifying update environment...
+echo [%date% %time%] Step 2: Verifying update environment... >> %LOGFILE%
+
+REM Check if we're in the right directory
+if not exist %TARGET_EXE% (
+    echo [%date% %time%] ERROR: Target EXE not found: %TARGET_EXE% >> %LOGFILE%
+    echo ERROR: Target application not found!
+    echo This may happen if FlightTracePro was moved after the update was prepared.
+    echo Please download and install the update manually.
+    echo.
+    pause
+    exit /b 1
+)
 
 echo Step 3: Creating backup...
 echo [%date% %time%] Step 3: Creating backup... >> %LOGFILE%
-if exist %TARGET_EXE% (
-    copy %TARGET_EXE% %BACKUP_EXE% >nul 2>&1
-    if errorlevel 1 (
-        echo [%date% %time%] ERROR: Could not create backup! >> %LOGFILE%
-        echo ERROR: Could not create backup!
-        pause
-        exit /b 1
-    ) else (
-        echo [%date% %time%] Backup created successfully >> %LOGFILE%
-    )
-) else (
-    echo [%date% %time%] ERROR: Original EXE not found: %TARGET_EXE% >> %LOGFILE%
-    echo ERROR: Original EXE not found!
+copy %TARGET_EXE% %BACKUP_EXE% >nul 2>&1
+if errorlevel 1 (
+    echo [%date% %time%] ERROR: Could not create backup! >> %LOGFILE%
+    echo ERROR: Could not create backup!
+    echo This may be due to file permissions or antivirus interference.
+    echo Please run as Administrator or temporarily disable antivirus.
+    echo.
     pause
     exit /b 1
+) else (
+    echo [%date% %time%] Backup created successfully >> %LOGFILE%
+    echo Backup created successfully
 )
 
 echo Step 4: Installing new version...
@@ -1019,8 +1107,8 @@ REM Simple but aggressive retry with longer waits
 set UPDATE_RETRY=0
 :update_retry
 set /a UPDATE_RETRY+=1
-echo [%date% %time%] Update attempt !UPDATE_RETRY!/20... >> %LOGFILE%
-echo Installing new version... (attempt !UPDATE_RETRY!/20)
+echo [%date% %time%] Update attempt !UPDATE_RETRY!/10 >> %LOGFILE%
+echo Installing new version (attempt !UPDATE_RETRY!/10)
 
 REM Delete target first to reduce conflicts
 if exist %TARGET_EXE% del %TARGET_EXE% >nul 2>&1
@@ -1053,7 +1141,7 @@ if exist %TARGET_EXE% (
 REM Fast retry logic - no waiting needed
 if !UPDATE_RETRY! LSS 10 (
     echo [%date% %time%] Copy failed, retrying immediately... >> %LOGFILE%
-    echo Copy failed, retrying (attempt !UPDATE_RETRY!/10)...
+    echo Copy failed, retrying (attempt !UPDATE_RETRY!/10)
     goto update_retry
 ) else (
     echo [%date% %time%] ERROR: Update failed after 10 attempts! >> %LOGFILE%
@@ -1083,32 +1171,43 @@ echo [%date% %time%] Step 5: Cleaning up... >> %LOGFILE%
 del %BACKUP_EXE% >nul 2>&1
 del %NEW_EXE% >nul 2>&1
 
-echo Step 6: Update complete - asking user about restart...
-echo [%date% %time%] Step 6: Update complete - asking user about restart... >> %LOGFILE%
+echo Step 6: Update complete - restarting application...
+echo [%date% %time%] Step 6: Update complete - restarting application... >> %LOGFILE%
 
-REM Show restart dialog using PowerShell
-echo [%date% %time%] Showing restart dialog... >> %LOGFILE%
-powershell -Command "Add-Type -AssemblyName System.Windows.Forms; $result = [System.Windows.Forms.MessageBox]::Show('Update completed successfully!`n`nRestart FlightTracePro now?', 'Update Complete', [System.Windows.Forms.MessageBoxButtons]::YesNo, [System.Windows.Forms.MessageBoxIcon]::Information); if ($result -eq 'Yes') {{ exit 1 }} else {{ exit 0 }}"
+echo Restarting FlightTracePro...
+echo [%date% %time%] Restarting FlightTracePro... >> %LOGFILE%
 
-if errorlevel 1 (
-    echo [%date% %time%] User chose to restart now >> %LOGFILE%
-    echo Restarting application now...
-    
-    REM Start application exactly like double-clicking using explorer
-    echo [%date% %time%] Launching application via explorer... >> %LOGFILE%
-    explorer "%TARGET_NOQUOTE%"
-    echo [%date% %time%] Launch command issued >> %LOGFILE%
-    
-    echo Update complete! Application is restarting...
+if "%DEFERRED_MODE%"=="true" (
+    echo [%date% %time%] Deferred update completed successfully >> %LOGFILE%
+    echo Deferred update completed! Starting the new version...
+    REM Clean up the deferred update marker file if it exists
+    del "%TEMP%\\flighttracepro_deferred_update.marker" >nul 2>&1
 ) else (
-    echo [%date% %time%] User chose to restart later >> %LOGFILE%
-    echo Update complete! Please restart FlightTracePro when convenient.
-    echo.
-    echo The new version will be active after you restart the application.
-    pause
+    echo [%date% %time%] Immediate update completed successfully >> %LOGFILE%
+    echo Immediate update completed! Starting the new version...
 )
 
+REM Start application exactly like double-clicking using explorer
+echo [%date% %time%] Launching application via explorer... >> %LOGFILE%
+explorer "%TARGET_NOQUOTE%"
+echo [%date% %time%] Launch command issued >> %LOGFILE%
+
+echo.
+if "%DEFERRED_MODE%"=="true" (
+    echo [SUCCESS] Deferred update to v%VERSION% completed successfully!
+) else (
+    echo [SUCCESS] Update to v%VERSION% completed successfully!
+)
+echo FlightTracePro is starting with the new version.
+echo [%date% %time%] Update successful - application restarted >> %LOGFILE%
+
 echo [%date% %time%] Update process completed >> %LOGFILE%
+
+REM Add a small delay before cleanup for deferred updates
+if "%DEFERRED_MODE%"=="true" (
+    echo Cleaning up deferred update files...
+    timeout /t 2 /nobreak >nul
+)
 
 REM Self-delete (but keep log file for debugging)
 echo [%date% %time%] Self-deleting batch file... >> %LOGFILE%
@@ -1138,87 +1237,112 @@ start "" /b cmd /c del /f /q "%~f0" >nul 2>&1
             
             self.append_log(f"[update] Starting update process...")
             
-            # Try multiple launch methods
-            launched = False
+            # For deferred updates, don't run the batch file immediately
+            launched = True  # Consider it successful since we're deferring
             
-            # Method 1: subprocess with proper detachment
-            try:
-                import subprocess
-                self.append_log(f"[update] Attempting subprocess launch...")
+            if not install_later:
+                # For immediate updates, try multiple launch methods
+                launched = False
                 
-                # Try different subprocess approaches
-                if hasattr(subprocess, 'CREATE_NEW_CONSOLE'):
-                    # Windows: Create new console window
-                    proc = subprocess.Popen(
-                        [bat],
-                        shell=False,
-                        creationflags=subprocess.CREATE_NEW_CONSOLE | subprocess.DETACHED_PROCESS,
-                        cwd=os.path.dirname(bat),
-                        stdin=subprocess.DEVNULL,
-                        stdout=subprocess.DEVNULL,
-                        stderr=subprocess.DEVNULL
-                    )
-                else:
-                    # Fallback
-                    proc = subprocess.Popen(
-                        [bat],
-                        shell=True,
-                        cwd=os.path.dirname(bat),
-                        stdin=subprocess.DEVNULL,
-                        stdout=subprocess.DEVNULL,
-                        stderr=subprocess.DEVNULL
-                    )
-                
-                self.append_log(f"[update] Subprocess started with PID: {proc.pid}")
-                
-                # Don't wait for the process - let it run independently
-                launched = True
-            except Exception as subprocess_error:
-                self.append_log(f"[update] Subprocess failed: {subprocess_error}")
-                
-                # Try the cmd.exe wrapper approach
+                # Method 1: subprocess with proper detachment
                 try:
-                    self.append_log(f"[update] Trying cmd.exe wrapper...")
-                    proc = subprocess.Popen(
-                        ['cmd.exe', '/c', 'start', '/min', bat],
-                        shell=False,
-                        creationflags=subprocess.DETACHED_PROCESS if hasattr(subprocess, 'DETACHED_PROCESS') else 0,
-                        cwd=os.path.dirname(bat)
-                    )
-                    self.append_log(f"[update] CMD wrapper started with PID: {proc.pid}")
+                    import subprocess
+                    self.append_log(f"[update] Attempting subprocess launch...")
+                    
+                    # Try different subprocess approaches
+                    if hasattr(subprocess, 'CREATE_NEW_CONSOLE'):
+                        # Windows: Create new console window - must use cmd.exe for batch files
+                        proc = subprocess.Popen(
+                            ['cmd.exe', '/c', bat],
+                            shell=False,
+                            creationflags=subprocess.CREATE_NEW_CONSOLE | subprocess.DETACHED_PROCESS,
+                            cwd=os.path.dirname(bat),
+                            stdin=subprocess.DEVNULL,
+                            stdout=subprocess.DEVNULL,
+                            stderr=subprocess.DEVNULL
+                        )
+                    else:
+                        # Fallback - use shell=True for batch files
+                        proc = subprocess.Popen(
+                            bat,
+                            shell=True,
+                            cwd=os.path.dirname(bat),
+                            stdin=subprocess.DEVNULL,
+                            stdout=subprocess.DEVNULL,
+                            stderr=subprocess.DEVNULL
+                        )
+                    
+                    self.append_log(f"[update] Subprocess started with PID: {proc.pid}")
+                    
+                    # Don't wait for the process - let it run independently
                     launched = True
-                except Exception as cmd_error:
-                    self.append_log(f"[update] CMD wrapper failed: {cmd_error}")
-            
-            # Method 2: os.startfile fallback
-            if not launched:
-                try:
-                    self.append_log(f"[update] Attempting startfile launch...")
-                    os.startfile(bat)
-                    launched = True
-                    self.append_log(f"[update] Started with os.startfile")
-                except Exception as startfile_error:
-                    self.append_log(f"[update] Startfile failed: {startfile_error}")
-            
-            # Method 3: system command fallback
-            if not launched:
-                try:
-                    self.append_log(f"[update] Attempting system command launch...")
-                    os.system(f'start "" "{bat}"')
-                    launched = True
-                    self.append_log(f"[update] Started with os.system")
-                except Exception as system_error:
-                    self.append_log(f"[update] System command failed: {system_error}")
+                except Exception as subprocess_error:
+                    self.append_log(f"[update] Subprocess failed: {subprocess_error}")
+                    
+                    # Try the cmd.exe wrapper approach
+                    try:
+                        self.append_log(f"[update] Trying cmd.exe wrapper...")
+                        proc = subprocess.Popen(
+                            ['cmd.exe', '/c', 'start', '/min', bat],
+                            shell=False,
+                            creationflags=subprocess.DETACHED_PROCESS if hasattr(subprocess, 'DETACHED_PROCESS') else 0,
+                            cwd=os.path.dirname(bat)
+                        )
+                        self.append_log(f"[update] CMD wrapper started with PID: {proc.pid}")
+                        launched = True
+                    except Exception as cmd_error:
+                        self.append_log(f"[update] CMD wrapper failed: {cmd_error}")
+                
+                # Method 2: os.startfile fallback
+                if not launched:
+                    try:
+                        self.append_log(f"[update] Attempting startfile launch...")
+                        os.startfile(bat)
+                        launched = True
+                        self.append_log(f"[update] Started with os.startfile")
+                    except Exception as startfile_error:
+                        self.append_log(f"[update] Startfile failed: {startfile_error}")
+                
+                # Method 3: system command fallback
+                if not launched:
+                    try:
+                        self.append_log(f"[update] Attempting system command launch...")
+                        os.system(f'start "" "{bat}"')
+                        launched = True
+                        self.append_log(f"[update] Started with os.system")
+                    except Exception as system_error:
+                        self.append_log(f"[update] System command failed: {system_error}")
             
             if launched:
-                self.append_log(f"[update] Update process started - application will restart in 5 seconds")
-                self.append_log(f"[update] Check update log after restart: {log_file}")
-                # Give the batch file time to start
-                import time
-                time.sleep(3)
-                self.append_log(f"[update] Exiting application for update...")
-                time.sleep(1)
-                os._exit(0)
+                if install_later:
+                    # For deferred installation, create marker file and show completion dialog
+                    self.append_log(f"[update] Update downloaded and prepared for restart later")
+                    self.append_log(f"[update] Update will install on next application start")
+                    self.append_log(f"[update] Check update log after restart: {log_file}")
+                    
+                    # Create deferred update marker file
+                    marker_file = os.path.join(tmpdir, 'flighttracepro_deferred_update.marker')
+                    with open(marker_file, 'w') as mf:
+                        mf.write(f"version={version}\n")
+                        mf.write(f"batch_file={bat}\n")
+                        mf.write(f"log_file={log_file}\n")
+                        mf.write(f"new_exe={newexe}\n")
+                    
+                    # Show completion dialog in main thread
+                    from PySide6.QtCore import QTimer
+                    def show_completion():
+                        self._show_deferred_update_completion(version)
+                    QTimer.singleShot(100, show_completion)
+                else:
+                    # Immediate installation - exit application
+                    self.append_log(f"[update] Update process started - application will restart in 5 seconds")
+                    self.append_log(f"[update] Check update log after restart: {log_file}")
+                    # Give the batch file time to start
+                    import time
+                    time.sleep(3)
+                    self.append_log(f"[update] Exiting application for update...")
+                    time.sleep(1)
+                    os._exit(0)
             else:
                 self.append_log(f"[update] ERROR: All launch methods failed!")
                 self.append_log(f"[update] Manual update required:")
@@ -1241,10 +1365,142 @@ start "" /b cmd /c del /f /q "%~f0" >nul 2>&1
         except Exception as e:
             self.append_log(f"[update] {e}")
     
+    def _show_deferred_update_completion(self, version):
+        """Show dialog when deferred update is ready"""
+        dialog = DeferredUpdateCompletionDialog(version, self)
+        dialog.exec()
+    
     def show_options_dialog(self):
         """Show options dialog"""
         dialog = OptionsDialog(self)
         dialog.exec()
+    
+    @Slot()
+    def check_for_deferred_update(self):
+        """Check for and handle deferred updates on startup"""
+        import os, tempfile
+        try:
+            tmpdir = tempfile.gettempdir()
+            marker_file = os.path.join(tmpdir, 'flighttracepro_deferred_update.marker')
+            
+            self.append_log(f"[update] Checking for deferred update marker: {marker_file}")
+            
+            if os.path.exists(marker_file):
+                self.append_log("[update] Found deferred update marker - processing...")
+                
+                # Read marker file
+                marker_data = {}
+                with open(marker_file, 'r') as mf:
+                    for line in mf:
+                        if '=' in line:
+                            key, value = line.strip().split('=', 1)
+                            marker_data[key] = value
+                
+                self.append_log(f"[update] Marker data: {marker_data}")
+                
+                version = marker_data.get('version', 'Unknown')
+                batch_file = marker_data.get('batch_file', '')
+                new_exe = marker_data.get('new_exe', '')
+                
+                self.append_log(f"[update] Batch file: {batch_file}")
+                self.append_log(f"[update] New exe: {new_exe}")
+                self.append_log(f"[update] Batch exists: {os.path.exists(batch_file) if batch_file else False}")
+                self.append_log(f"[update] New exe exists: {os.path.exists(new_exe) if new_exe else False}")
+                
+                if batch_file and os.path.exists(batch_file) and new_exe and os.path.exists(new_exe):
+                    # Auto-apply deferred update on startup
+                    self.append_log("[update] Auto-applying deferred update...")
+                    
+                    # Execute the batch file and exit immediately
+                    try:
+                        import subprocess
+                        self.append_log(f"[update] Executing batch file: {batch_file}")
+                        
+                        # Debug: Check batch file properties
+                        try:
+                            batch_size = os.path.getsize(batch_file)
+                            self.append_log(f"[update] Batch file size: {batch_size} bytes")
+                            
+                            # Check if we can read the batch file
+                            with open(batch_file, 'r', encoding='cp1252') as bf:
+                                first_line = bf.readline().strip()
+                            self.append_log(f"[update] Batch first line: {repr(first_line)}")
+                        except Exception as debug_e:
+                            self.append_log(f"[update] Batch file debug failed: {debug_e}")
+                        
+                        # Try different execution methods for Windows compatibility
+                        launched = False
+                        
+                        # Method 1: Direct batch execution with shell=True
+                        try:
+                            proc = subprocess.Popen(
+                                batch_file,
+                                shell=True,
+                                cwd=os.path.dirname(batch_file),
+                                creationflags=subprocess.CREATE_NEW_CONSOLE if hasattr(subprocess, 'CREATE_NEW_CONSOLE') else 0
+                            )
+                            self.append_log(f"[update] Method 1 success - PID: {proc.pid}")
+                            launched = True
+                        except Exception as e1:
+                            self.append_log(f"[update] Method 1 failed: {e1}")
+                            
+                            # Method 2: cmd.exe with proper quoting
+                            try:
+                                proc = subprocess.Popen(
+                                    f'cmd.exe /c "{batch_file}"',
+                                    shell=True,
+                                    cwd=os.path.dirname(batch_file)
+                                )
+                                self.append_log(f"[update] Method 2 success - PID: {proc.pid}")
+                                launched = True
+                            except Exception as e2:
+                                self.append_log(f"[update] Method 2 failed: {e2}")
+                                
+                                # Method 3: os.startfile as last resort
+                                try:
+                                    os.startfile(batch_file)
+                                    self.append_log("[update] Method 3 (os.startfile) success")
+                                    launched = True
+                                except Exception as e3:
+                                    self.append_log(f"[update] Method 3 failed: {e3}")
+                        
+                        if launched:
+                            # Remove marker file
+                            os.remove(marker_file)
+                            self.append_log("[update] Auto-applying deferred update - application will restart...")
+                            # Exit application
+                            import time
+                            time.sleep(1)
+                            os._exit(0)
+                        else:
+                            raise Exception("All execution methods failed")
+                    except ImportError:
+                        self.append_log(f"[update] subprocess not available, using fallback...")
+                        try:
+                            os.startfile(batch_file)
+                            os.remove(marker_file) 
+                            import time
+                            time.sleep(1)
+                            os._exit(0)
+                        except Exception as fallback_e:
+                            self.append_log(f"[update] Fallback failed: {fallback_e}")
+                    except Exception as e:
+                        self.append_log(f"[update] Failed to execute deferred update: {e}")
+                        # If auto-execution fails, show the dialog as fallback
+                        self.append_log("[update] Auto-execution failed, showing restart dialog...")
+                        dialog = DeferredUpdateRestartDialog(version, batch_file, self)
+                        dialog.exec()
+                else:
+                    if batch_file and not os.path.exists(batch_file):
+                        self.append_log(f"[update] Deferred update batch file missing: {batch_file}")
+                    if new_exe and not os.path.exists(new_exe):
+                        self.append_log(f"[update] Deferred update exe file missing: {new_exe}")
+                    self.append_log("[update] Deferred update files not found, removing marker")
+                    os.remove(marker_file)
+            else:
+                self.append_log("[update] No deferred update marker found")
+        except Exception as e:
+            self.append_log(f"[update] Error checking for deferred updates: {e}")
 
 
 class CloseDialog(QDialog):
@@ -1395,6 +1651,427 @@ class OptionsDialog(QDialog):
         super().accept()
 
 
+class UpdateDialog(QDialog):
+    """Modern update dialog with Material Design styling"""
+    
+    class UpdateAction:
+        CANCEL = 0
+        INSTALL_NOW = 1
+        INSTALL_LATER = 2
+    
+    def __init__(self, version, download_url, parent=None):
+        super().__init__(parent)
+        self.version = version
+        self.download_url = download_url
+        self.result_action = self.UpdateAction.CANCEL
+        
+        self.setWindowTitle("FlightTracePro Update Available")
+        self.setFixedSize(500, 400)
+        self.setModal(True)
+        
+        # Apply modern styling
+        self.setStyleSheet("""
+            QDialog {
+                background: qlineargradient(x1: 0, y1: 0, x2: 0, y2: 1,
+                    stop: 0 #f8f9fa, stop: 1 #e9ecef);
+                border-radius: 10px;
+            }
+            QLabel#titleLabel {
+                font-size: 20px;
+                font-weight: bold;
+                color: #1976d2;
+                margin-bottom: 10px;
+            }
+            QLabel#versionLabel {
+                font-size: 16px;
+                font-weight: 600;
+                color: #2e7d32;
+                margin-bottom: 5px;
+            }
+            QLabel#descLabel {
+                font-size: 12px;
+                color: #555;
+                line-height: 1.4;
+            }
+            QPushButton {
+                background: qlineargradient(x1: 0, y1: 0, x2: 0, y2: 1,
+                    stop: 0 #2196f3, stop: 1 #1976d2);
+                border: none;
+                border-radius: 6px;
+                color: white;
+                font-weight: 600;
+                font-size: 13px;
+                padding: 12px 24px;
+                margin: 4px;
+            }
+            QPushButton:hover {
+                background: qlineargradient(x1: 0, y1: 0, x2: 0, y2: 1,
+                    stop: 0 #42a5f5, stop: 1 #1e88e5);
+            }
+            QPushButton:pressed {
+                background: qlineargradient(x1: 0, y1: 0, x2: 0, y2: 1,
+                    stop: 0 #1565c0, stop: 1 #0d47a1);
+            }
+            QPushButton#primaryButton {
+                background: qlineargradient(x1: 0, y1: 0, x2: 0, y2: 1,
+                    stop: 0 #4caf50, stop: 1 #388e3c);
+            }
+            QPushButton#primaryButton:hover {
+                background: qlineargradient(x1: 0, y1: 0, x2: 0, y2: 1,
+                    stop: 0 #66bb6a, stop: 1 #43a047);
+            }
+            QPushButton#secondaryButton {
+                background: qlineargradient(x1: 0, y1: 0, x2: 0, y2: 1,
+                    stop: 0 #ff9800, stop: 1 #f57c00);
+            }
+            QPushButton#secondaryButton:hover {
+                background: qlineargradient(x1: 0, y1: 0, x2: 0, y2: 1,
+                    stop: 0 #ffb74d, stop: 1 #fb8c00);
+            }
+            QPushButton#cancelButton {
+                background: qlineargradient(x1: 0, y1: 0, x2: 0, y2: 1,
+                    stop: 0 #757575, stop: 1 #424242);
+            }
+            QPushButton#cancelButton:hover {
+                background: qlineargradient(x1: 0, y1: 0, x2: 0, y2: 1,
+                    stop: 0 #9e9e9e, stop: 1 #616161);
+            }
+            QFrame#separatorFrame {
+                background-color: #e0e0e0;
+                border: none;
+            }
+        """)
+        
+        # Main layout
+        layout = QVBoxLayout(self)
+        layout.setSpacing(20)
+        layout.setContentsMargins(30, 30, 30, 30)
+        
+        # Header section with icon and title
+        header_layout = QHBoxLayout()
+        
+        # Update icon
+        icon_label = QLabel()
+        update_icon = self.style().standardIcon(QStyle.StandardPixmap.SP_MessageBoxInformation)
+        icon_label.setPixmap(update_icon.pixmap(48, 48))
+        icon_label.setAlignment(Qt.AlignmentFlag.AlignTop)
+        header_layout.addWidget(icon_label)
+        
+        # Title and version info
+        info_layout = QVBoxLayout()
+        
+        title_label = QLabel("🚀 Update Available!")
+        title_label.setObjectName("titleLabel")
+        info_layout.addWidget(title_label)
+        
+        version_label = QLabel(f"Version {version}")
+        version_label.setObjectName("versionLabel")
+        info_layout.addWidget(version_label)
+        
+        header_layout.addLayout(info_layout, 1)
+        layout.addLayout(header_layout)
+        
+        # Separator
+        separator = QFrame()
+        separator.setObjectName("separatorFrame")
+        separator.setFrameShape(QFrame.Shape.HLine)
+        separator.setFrameShadow(QFrame.Shadow.Plain)
+        separator.setFixedHeight(1)
+        layout.addWidget(separator)
+        
+        # Description
+        desc_text = (
+            "A new version of FlightTracePro is available with improvements and bug fixes.\n\n"
+            "Choose how you'd like to proceed:\n\n"
+            "• Install Now: Download and install immediately (app will restart)\n"
+            "• Install Later: Download now, auto-install on next app start\n"
+            "• Cancel: Skip this update for now"
+        )
+        desc_label = QLabel(desc_text)
+        desc_label.setObjectName("descLabel")
+        desc_label.setWordWrap(True)
+        desc_label.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
+        desc_label.setMargin(10)
+        layout.addWidget(desc_label, 1)
+        
+        # Button section
+        button_layout = QVBoxLayout()
+        button_layout.setSpacing(8)
+        
+        # Install Now button
+        self.install_now_btn = QPushButton("🔄 Install Now & Restart")
+        self.install_now_btn.setObjectName("primaryButton")
+        self.install_now_btn.setToolTip("Download and install the update immediately. The app will restart automatically.")
+        self.install_now_btn.clicked.connect(lambda: self._accept_with_action(self.UpdateAction.INSTALL_NOW))
+        button_layout.addWidget(self.install_now_btn)
+        
+        # Install Later button
+        self.install_later_btn = QPushButton("⏰ Download Now, Auto-Install Later")
+        self.install_later_btn.setObjectName("secondaryButton")
+        self.install_later_btn.setToolTip("Download the update now, then automatically install it the next time you start the app.")
+        self.install_later_btn.clicked.connect(lambda: self._accept_with_action(self.UpdateAction.INSTALL_LATER))
+        button_layout.addWidget(self.install_later_btn)
+        
+        # Horizontal layout for cancel button
+        cancel_layout = QHBoxLayout()
+        cancel_layout.addStretch()
+        
+        # Cancel button
+        cancel_btn = QPushButton("✖️ Skip This Update")
+        cancel_btn.setObjectName("cancelButton")
+        cancel_btn.setToolTip("Skip this update and continue using the current version.")
+        cancel_btn.clicked.connect(lambda: self._accept_with_action(self.UpdateAction.CANCEL))
+        cancel_layout.addWidget(cancel_btn)
+        
+        button_layout.addLayout(cancel_layout)
+        layout.addLayout(button_layout)
+        
+        # Set focus and default
+        self.install_later_btn.setFocus()
+    
+    def _accept_with_action(self, action):
+        self.result_action = action
+        if action == self.UpdateAction.CANCEL:
+            self.reject()
+        else:
+            self.accept()
+    
+    def exec(self):
+        super().exec()
+        return self.result_action
+
+
+class DeferredUpdateCompletionDialog(QDialog):
+    """Dialog shown when a deferred update download is complete"""
+    
+    def __init__(self, version, parent=None):
+        super().__init__(parent)
+        self.version = version
+        
+        self.setWindowTitle("FlightTracePro Update Ready")
+        self.setFixedSize(400, 250)
+        self.setModal(True)
+        
+        # Apply styling
+        self.setStyleSheet("""
+            QDialog {
+                background: qlineargradient(x1: 0, y1: 0, x2: 0, y2: 1,
+                    stop: 0 #f1f8e9, stop: 1 #e8f5e8);
+                border-radius: 10px;
+            }
+            QLabel#titleLabel {
+                font-size: 18px;
+                font-weight: bold;
+                color: #2e7d32;
+                margin-bottom: 10px;
+            }
+            QLabel#descLabel {
+                font-size: 12px;
+                color: #555;
+                line-height: 1.4;
+            }
+            QPushButton {
+                background: qlineargradient(x1: 0, y1: 0, x2: 0, y2: 1,
+                    stop: 0 #4caf50, stop: 1 #388e3c);
+                border: none;
+                border-radius: 6px;
+                color: white;
+                font-weight: 600;
+                font-size: 13px;
+                padding: 12px 24px;
+                margin: 4px;
+            }
+            QPushButton:hover {
+                background: qlineargradient(x1: 0, y1: 0, x2: 0, y2: 1,
+                    stop: 0 #66bb6a, stop: 1 #43a047);
+            }
+        """)
+        
+        layout = QVBoxLayout(self)
+        layout.setSpacing(20)
+        layout.setContentsMargins(30, 30, 30, 30)
+        
+        # Header with checkmark icon
+        header_layout = QHBoxLayout()
+        
+        # Success icon
+        icon_label = QLabel("✅")
+        icon_label.setStyleSheet("font-size: 32px;")
+        icon_label.setAlignment(Qt.AlignmentFlag.AlignTop)
+        header_layout.addWidget(icon_label)
+        
+        # Title
+        title_label = QLabel(f"Update v{version} Downloaded!")
+        title_label.setObjectName("titleLabel")
+        header_layout.addWidget(title_label, 1)
+        
+        layout.addLayout(header_layout)
+        
+        # Description
+        desc_text = (
+            f"The update to version {version} has been downloaded and is ready to install.\n\n"
+            "The update will automatically install and restart the application the next time you start FlightTracePro."
+        )
+        desc_label = QLabel(desc_text)
+        desc_label.setObjectName("descLabel")
+        desc_label.setWordWrap(True)
+        desc_label.setAlignment(Qt.AlignmentFlag.AlignLeft)
+        layout.addWidget(desc_label, 1)
+        
+        # OK button
+        button_layout = QHBoxLayout()
+        button_layout.addStretch()
+        
+        ok_btn = QPushButton("👍 Got It!")
+        ok_btn.clicked.connect(self.accept)
+        button_layout.addWidget(ok_btn)
+        
+        layout.addLayout(button_layout)
+
+
+class DeferredUpdateRestartDialog(QDialog):
+    """Dialog shown on startup when a deferred update is ready to install"""
+    
+    class RestartAction:
+        CANCEL = 0
+        RESTART_NOW = 1
+        RESTART_LATER = 2
+    
+    def __init__(self, version, batch_file, parent=None):
+        super().__init__(parent)
+        self.version = version
+        self.batch_file = batch_file
+        self.result_action = self.RestartAction.CANCEL
+        
+        self.setWindowTitle("FlightTracePro Update Ready")
+        self.setFixedSize(450, 350)
+        self.setModal(True)
+        
+        # Apply styling
+        self.setStyleSheet("""
+            QDialog {
+                background: qlineargradient(x1: 0, y1: 0, x2: 0, y2: 1,
+                    stop: 0 #fff3e0, stop: 1 #ffe0b2);
+                border-radius: 10px;
+            }
+            QLabel#titleLabel {
+                font-size: 18px;
+                font-weight: bold;
+                color: #ef6c00;
+                margin-bottom: 10px;
+            }
+            QLabel#descLabel {
+                font-size: 12px;
+                color: #555;
+                line-height: 1.4;
+            }
+            QPushButton {
+                background: qlineargradient(x1: 0, y1: 0, x2: 0, y2: 1,
+                    stop: 0 #ff9800, stop: 1 #f57c00);
+                border: none;
+                border-radius: 6px;
+                color: white;
+                font-weight: 600;
+                font-size: 13px;
+                padding: 12px 24px;
+                margin: 4px;
+            }
+            QPushButton:hover {
+                background: qlineargradient(x1: 0, y1: 0, x2: 0, y2: 1,
+                    stop: 0 #ffb74d, stop: 1 #fb8c00);
+            }
+            QPushButton#primaryButton {
+                background: qlineargradient(x1: 0, y1: 0, x2: 0, y2: 1,
+                    stop: 0 #4caf50, stop: 1 #388e3c);
+            }
+            QPushButton#primaryButton:hover {
+                background: qlineargradient(x1: 0, y1: 0, x2: 0, y2: 1,
+                    stop: 0 #66bb6a, stop: 1 #43a047);
+            }
+            QPushButton#cancelButton {
+                background: qlineargradient(x1: 0, y1: 0, x2: 0, y2: 1,
+                    stop: 0 #757575, stop: 1 #424242);
+            }
+            QPushButton#cancelButton:hover {
+                background: qlineargradient(x1: 0, y1: 0, x2: 0, y2: 1,
+                    stop: 0 #9e9e9e, stop: 1 #616161);
+            }
+        """)
+        
+        layout = QVBoxLayout(self)
+        layout.setSpacing(20)
+        layout.setContentsMargins(30, 30, 30, 30)
+        
+        # Header with update icon
+        header_layout = QHBoxLayout()
+        
+        # Update pending icon
+        icon_label = QLabel("🔄")
+        icon_label.setStyleSheet("font-size: 32px;")
+        icon_label.setAlignment(Qt.AlignmentFlag.AlignTop)
+        header_layout.addWidget(icon_label)
+        
+        # Title
+        title_label = QLabel(f"Update v{version} Ready to Install")
+        title_label.setObjectName("titleLabel")
+        header_layout.addWidget(title_label, 1)
+        
+        layout.addLayout(header_layout)
+        
+        # Description
+        desc_text = (
+            f"A previously downloaded update (version {version}) is ready to install.\n\n"
+            "Would you like to install it now or continue with the current version?\n\n"
+            "The installation process will:\n"
+            "• Close the current application\n"
+            "• Install the new version\n"
+            "• Restart FlightTracePro automatically"
+        )
+        desc_label = QLabel(desc_text)
+        desc_label.setObjectName("descLabel")
+        desc_label.setWordWrap(True)
+        desc_label.setAlignment(Qt.AlignmentFlag.AlignLeft)
+        layout.addWidget(desc_label, 1)
+        
+        # Button section
+        button_layout = QVBoxLayout()
+        button_layout.setSpacing(8)
+        
+        # Install now button
+        install_btn = QPushButton("🚀 Install Update Now")
+        install_btn.setObjectName("primaryButton")
+        install_btn.setToolTip("Install the update and restart the application now")
+        install_btn.clicked.connect(lambda: self._accept_with_action(self.RestartAction.RESTART_NOW))
+        button_layout.addWidget(install_btn)
+        
+        # Horizontal layout for other buttons
+        other_layout = QHBoxLayout()
+        
+        # Continue button
+        continue_btn = QPushButton("⏭️ Continue Without Update")
+        continue_btn.setObjectName("cancelButton")
+        continue_btn.setToolTip("Continue using the current version (update will remain available)")
+        continue_btn.clicked.connect(lambda: self._accept_with_action(self.RestartAction.RESTART_LATER))
+        other_layout.addWidget(continue_btn)
+        
+        button_layout.addLayout(other_layout)
+        layout.addLayout(button_layout)
+        
+        # Set default focus
+        install_btn.setFocus()
+    
+    def _accept_with_action(self, action):
+        self.result_action = action
+        if action == self.RestartAction.RESTART_LATER:
+            self.reject()
+        else:
+            self.accept()
+    
+    def exec(self):
+        super().exec()
+        return self.result_action
+
+
 def get_app_version():
     """Get app version from VERSION_BUILD or VERSION file or fallback to hardcoded"""
     import os
@@ -1432,10 +2109,34 @@ def main():
             print("  --help, -h        Show this help")
             sys.exit(0)
     
+    # Create application with proper cleanup
     app = QApplication(sys.argv)
-    win = MainWindow()
-    win.show()
-    sys.exit(app.exec())
+    app.setQuitOnLastWindowClosed(False)  # Keep running when window is closed (for tray)
+    
+    try:
+        win = MainWindow()
+        win.show()
+        
+        # Run the application event loop
+        exit_code = app.exec()
+        
+        # Ensure proper cleanup
+        try:
+            win.quit_application()
+        except:
+            pass
+            
+        sys.exit(exit_code)
+        
+    except Exception as e:
+        print(f"Application error: {e}")
+        sys.exit(1)
+    finally:
+        # Force cleanup of any remaining Qt objects
+        try:
+            QApplication.processEvents()
+        except:
+            pass
 
 
 if __name__ == '__main__':
