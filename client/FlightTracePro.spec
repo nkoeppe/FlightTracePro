@@ -12,10 +12,17 @@ client_dir = Path(globals().get('SPECPATH', '.'))
 
 data_files = collect_data_files('certifi')
 
+# Ensure Python runtime DLLs are included
+python_dll_binaries = []
+if hasattr(sys, 'base_exec_prefix'):
+    python_dll_path = os.path.join(sys.base_exec_prefix, f'python{sys.version_info.major}{sys.version_info.minor}.dll')
+    if os.path.exists(python_dll_path):
+        python_dll_binaries.append((python_dll_path, '.'))
+
 a = Analysis(
     [str(client_dir / 'msfs_bridge_gui.pyw')],
     pathex=[str(client_dir)],
-    binaries=[],
+    binaries=python_dll_binaries,
     datas=data_files,
     hiddenimports=[
         'SimConnect',
@@ -58,9 +65,16 @@ a = Analysis(
     noarchive=False,
 )
 
-# Remove duplicate entries and optimize
+# Remove duplicate entries and optimize, but keep Python DLLs
 a.binaries = [x for x in a.binaries if not x[0].lower().startswith('api-ms-win')]
 a.binaries = [x for x in a.binaries if not x[0].lower().startswith('ucrtbase')]
+# Ensure Python DLL is preserved (check by filename in binary name)
+python_dll_name = f'python{sys.version_info.major}{sys.version_info.minor}.dll'
+has_python_dll = any(python_dll_name.lower() in x[0].lower() for x in a.binaries)
+if not has_python_dll:
+    print(f"Adding Python DLL: {python_dll_name}")
+    for dll_path, target_dir in python_dll_binaries:
+        a.binaries.append((os.path.basename(dll_path), dll_path, 'BINARY'))
 
 pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)
 
@@ -75,9 +89,9 @@ exe = EXE(
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
-    upx=True,
+    upx=False,
     upx_exclude=[],
-    runtime_tmpdir=None,
+    # Remove runtime_tmpdir to use default temp extraction - fixes DLL issues with batch restart
     console=False,
     disable_windowed_traceback=False,
     argv_emulation=False,

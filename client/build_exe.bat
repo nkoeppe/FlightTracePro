@@ -27,13 +27,14 @@ if exist dist\FlightTracePro.exe (
     echo [FlightTracePro] ✅ Built dist\FlightTracePro.exe successfully!
     echo [FlightTracePro] Testing executable...
     
-    REM Quick test - should not crash on startup
-    timeout /t 1 /nobreak > nul
-    if exist dist\FlightTracePro.exe (
-        echo [FlightTracePro] ✅ Executable appears valid
+    REM Test version flag - simulates update process startup
+    echo [FlightTracePro] Testing --version flag (simulates update restart)...
+    dist\FlightTracePro.exe --version
+    if !errorlevel! equ 0 (
+        echo [FlightTracePro] ✅ Version test passed - DLL issues should be fixed
     ) else (
-        echo [FlightTracePro] ❌ Executable test failed
-        exit /b 1
+        echo [FlightTracePro] ❌ Version test failed - possible DLL issue
+        echo [FlightTracePro] This may cause problems during auto-update restart
     )
 ) else (
     echo [FlightTracePro] ❌ Build failed - executable not found

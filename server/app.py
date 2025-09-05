@@ -10,12 +10,13 @@ import asyncio
 import gpxpy
 import simplekml
 from io import StringIO, BytesIO
-from typing import Optional
+from typing import Optional, List, Dict
 from uuid import uuid4
 import os
 import json
 import time
-from typing import Dict, List
+from dataclasses import dataclass
+from math import radians, sin, cos, sqrt, atan2
 
 # Database (PostgreSQL via SQLAlchemy async)
 from sqlalchemy import String, Float, Boolean, BigInteger, Index, select, func
@@ -70,6 +71,8 @@ class ChannelState:
         self.active_callsigns: set[str] = set()
         self.history: dict[str, list[dict]] = {}
         self.history_max = 5000
+        # Track segments cache for intelligent display
+        self.track_segments: dict[str, List[TrackSegment]] = {}
         # per-callsign filter state
         self.filters: dict[str, dict] = {}
         # persistence state
@@ -77,13 +80,369 @@ class ChannelState:
         self._dirty: bool = False
 
 def _haversine_m(lat1, lon1, lat2, lon2):
-    from math import radians, sin, cos, sqrt, atan2
     R = 6371000.0
     dlat = radians(lat2 - lat1)
     dlon = radians(lon2 - lon1)
     a = sin(dlat/2)**2 + cos(radians(lat1))*cos(radians(lat2))*sin(dlon/2)**2
     c = 2 * atan2(sqrt(a), sqrt(1-a))
     return R * c
+
+# ============================================================================
+# AVIATION-REALISTIC TRACK RECOGNITION - Engine Start to Engine Stop
+# ============================================================================
+
+@dataclass
+class FlightPoint:
+    """Unified flight point representation for processing"""
+    lat: float
+    lon: float
+    time: Optional[float] = None  # Unix timestamp
+    ele: Optional[float] = None   # Elevation in meters
+    speed: Optional[float] = None # Speed in m/s
+
+@dataclass  
+class FlightSegment:
+    """A complete flight from engine start to engine stop"""
+    points: List[FlightPoint]
+    name: str = ""
+    start_time: Optional[float] = None
+    end_time: Optional[float] = None
+    duration_s: Optional[float] = None
+    distance_km: float = 0.0
+    max_altitude_m: Optional[float] = None
+    avg_speed_kts: Optional[float] = None
+    max_speed_kts: Optional[float] = None
+    
+    def __post_init__(self):
+        if self.points:
+            self.start_time = self.points[0].time
+            self.end_time = self.points[-1].time
+            if self.start_time and self.end_time:
+                self.duration_s = max(0, self.end_time - self.start_time)
+            self._calculate_metrics()
+    
+    def _calculate_metrics(self):
+        """Calculate flight metrics"""
+        if len(self.points) < 2:
+            return
+        
+        # Distance calculation
+        total_distance = 0.0
+        speeds = []
+        altitudes = []
+        
+        for i in range(len(self.points) - 1):
+            p1, p2 = self.points[i], self.points[i + 1]
+            
+            # Distance
+            dist = _haversine_m(p1.lat, p1.lon, p2.lat, p2.lon)
+            total_distance += dist
+            
+            # Speed calculation
+            if p1.time and p2.time and p2.time > p1.time:
+                dt = p2.time - p1.time
+                if dt > 0:
+                    speed_ms = dist / dt
+                    speeds.append(speed_ms * 1.94384)  # Convert to knots
+            
+            # Altitudes
+            if p1.ele is not None:
+                altitudes.append(p1.ele)
+        
+        # Add last point's altitude
+        if self.points[-1].ele is not None:
+            altitudes.append(self.points[-1].ele)
+        
+        self.distance_km = total_distance / 1000.0
+        if speeds:
+            self.avg_speed_kts = sum(speeds) / len(speeds)
+            self.max_speed_kts = max(speeds)
+        if altitudes:
+            self.max_altitude_m = max(altitudes)
+
+class AviationTrackProcessor:
+    """Aviation-smart track processing - Handles all flight start scenarios"""
+    
+    def __init__(self):
+        # ENGINE SHUTDOWN DETECTION (primary flight end criteria)
+        self.ENGINE_OFF_TIME_S = 600         # 10+ min stopped = likely engine off
+        self.ENGINE_OFF_SPEED_MS = 1.0       # < 1 m/s = stationary
+        self.GROUND_ALTITUDE_M = 100         # < 100m = likely ground level
+        
+        # SESSION BREAK DETECTION (different flight sessions)
+        self.SESSION_GAP_HOURS = 4           # 4+ hours = different session
+        
+        # DATA QUALITY & ANOMALY DETECTION
+        self.TELEPORT_THRESHOLD_KM = 50      # 50km+ instant jump
+        self.TELEPORT_TIME_WINDOW_S = 30     # Within 30 seconds = likely teleport
+        self.MAX_REALISTIC_SPEED_MS = 250    # 900 km/h max realistic speed
+        self.LAG_SPIKE_POINTS = 3            # Filter out 1-3 point spikes
+        
+        # FLIGHT RESTART DETECTION (smart restart vs teleport)
+        self.RESTART_INDICATORS = {
+            'same_origin_km': 5.0,           # Within 5km of flight start = restart
+            'altitude_drop_ratio': 0.3,      # Altitude drops >30% = restart
+            'speed_reset_threshold': 5.0     # Speed drops to <5 m/s = restart
+        }
+        
+        # Minimum flight validity
+        self.MIN_POINTS = 8                  # At least 8 points
+        self.MIN_DISTANCE_KM = 0.5           # At least 500m traveled  
+        self.MIN_DURATION_MIN = 1            # At least 1 minute
+    
+    def process_history(self, history: List[dict]) -> List[FlightSegment]:
+        """Process raw history into complete flights"""
+        if not history:
+            return []
+        
+        # Convert to FlightPoints
+        points = []
+        for h in history:
+            if not self._is_valid_point(h):
+                continue
+            point = FlightPoint(
+                lat=h.get('lat', 0.0),
+                lon=h.get('lon', 0.0),
+                time=h.get('ts'),
+                ele=h.get('alt_m'),
+                speed=h.get('spd_kt', 0) * 0.514444 if h.get('spd_kt') else None
+            )
+            points.append(point)
+        
+        if len(points) < self.MIN_POINTS:
+            return []
+        
+        # Find flight boundaries (engine start/stop cycles)
+        flights = self._segment_into_flights(points)
+        
+        # Filter and name flights
+        return self._finalize_flights(flights)
+    
+    def _is_valid_point(self, point: dict) -> bool:
+        """Check if point has valid coordinates"""
+        lat = point.get('lat', 0)
+        lon = point.get('lon', 0)
+        return (abs(lat) <= 90 and abs(lon) <= 180 and 
+                lat != 0 and lon != 0)
+    
+    def _segment_into_flights(self, points: List[FlightPoint]) -> List[List[FlightPoint]]:
+        """Aviation-smart flight segmentation with anomaly detection"""
+        if len(points) < 2:
+            return [points]
+        
+        # Step 1: Clean data anomalies (lag spikes, impossible speeds)
+        cleaned_points = self._clean_data_anomalies(points)
+        
+        if len(cleaned_points) < 2:
+            return [cleaned_points] if cleaned_points else []
+        
+        flights = []
+        current_flight = [cleaned_points[0]]
+        flight_origin = cleaned_points[0]  # Track where this flight started
+        engine_off_accumulator = 0.0
+        
+        for i in range(1, len(cleaned_points)):
+            prev = cleaned_points[i-1] 
+            curr = cleaned_points[i]
+            
+            # Calculate metrics
+            dt = None
+            if prev.time and curr.time:
+                dt = max(0, curr.time - prev.time)
+            
+            distance_m = _haversine_m(prev.lat, prev.lon, curr.lat, curr.lon)
+            speed_ms = (distance_m / dt) if dt and dt > 0 else 0
+            
+            # DECISION TREE - Aviation Logic
+            should_split = False
+            split_reason = ""
+            
+            # 1. SESSION GAP - Different flight session
+            if dt and dt > (self.SESSION_GAP_HOURS * 3600):
+                should_split = True
+                split_reason = "session_gap"
+            
+            # 2. TRUE TELEPORT vs FLIGHT RESTART
+            elif distance_m > (self.TELEPORT_THRESHOLD_KM * 1000):
+                if self._is_flight_restart(curr, flight_origin, prev):
+                    should_split = True  
+                    split_reason = "flight_restart"
+                elif dt and dt < self.TELEPORT_TIME_WINDOW_S:
+                    should_split = True
+                    split_reason = "teleport"
+                # else: might be normal flight over long distance - don't split
+            
+            # 3. ENGINE SHUTDOWN - Only if clearly on ground + stopped
+            elif self._is_engine_shutdown(curr, prev, speed_ms):
+                engine_off_accumulator += dt or 0
+                if engine_off_accumulator >= self.ENGINE_OFF_TIME_S:
+                    should_split = True
+                    split_reason = "engine_shutdown"
+            else:
+                engine_off_accumulator = 0  # Reset - aircraft is active
+            
+            # Execute split decision
+            if should_split:
+                if len(current_flight) >= self.MIN_POINTS:
+                    flights.append(current_flight)
+                current_flight = [curr]
+                flight_origin = curr  # New flight origin
+                engine_off_accumulator = 0
+                
+                if split_reason:
+                    # Debug info (could be logged)
+                    pass
+            else:
+                current_flight.append(curr)
+        
+        # Add final flight
+        if len(current_flight) >= self.MIN_POINTS:
+            flights.append(current_flight)
+        
+        return flights
+    
+    def _clean_data_anomalies(self, points: List[FlightPoint]) -> List[FlightPoint]:
+        """Remove obvious data anomalies and lag spikes"""
+        if len(points) < 3:
+            return points
+        
+        cleaned = [points[0]]  # Always keep first point
+        
+        for i in range(1, len(points) - 1):
+            prev = points[i-1]
+            curr = points[i]
+            next_pt = points[i+1]
+            
+            # Check if current point is a lag spike
+            is_spike = self._is_lag_spike(prev, curr, next_pt)
+            
+            if not is_spike:
+                cleaned.append(curr)
+        
+        # Always keep last point
+        if len(points) > 1:
+            cleaned.append(points[-1])
+        
+        return cleaned
+    
+    def _is_lag_spike(self, prev: FlightPoint, curr: FlightPoint, next_pt: FlightPoint) -> bool:
+        """Detect single-point lag spikes (GPS glitches, data errors)"""
+        if not (prev.time and curr.time and next_pt.time):
+            return False
+        
+        # Calculate distances and speeds
+        dist1 = _haversine_m(prev.lat, prev.lon, curr.lat, curr.lon)
+        dist2 = _haversine_m(curr.lat, curr.lon, next_pt.lat, next_pt.lon)
+        direct_dist = _haversine_m(prev.lat, prev.lon, next_pt.lat, next_pt.lon)
+        
+        dt1 = curr.time - prev.time
+        dt2 = next_pt.time - curr.time
+        
+        if dt1 <= 0 or dt2 <= 0:
+            return False
+        
+        speed1 = dist1 / dt1
+        speed2 = dist2 / dt2
+        
+        # Spike indicators:
+        # 1. Unrealistic speeds in/out of the point
+        unrealistic_speed = speed1 > self.MAX_REALISTIC_SPEED_MS or speed2 > self.MAX_REALISTIC_SPEED_MS
+        
+        # 2. Point creates detour - direct path is much shorter
+        detour_ratio = (dist1 + dist2) / max(direct_dist, 1.0)
+        excessive_detour = detour_ratio > 3.0 and direct_dist < 1000  # 1km threshold
+        
+        return unrealistic_speed or excessive_detour
+    
+    def _is_flight_restart(self, curr: FlightPoint, flight_origin: FlightPoint, prev: FlightPoint) -> bool:
+        """Smart detection: Flight restart vs normal teleport"""
+        
+        # Check if we're back near the flight origin
+        origin_distance = _haversine_m(flight_origin.lat, flight_origin.lon, curr.lat, curr.lon)
+        back_to_origin = origin_distance < (self.RESTART_INDICATORS['same_origin_km'] * 1000)
+        
+        # Check altitude patterns
+        altitude_reset = False
+        if (prev.ele is not None and curr.ele is not None and 
+            flight_origin.ele is not None):
+            
+            alt_drop_ratio = (prev.ele - curr.ele) / max(prev.ele, 100)  # Avoid div by zero
+            altitude_reset = alt_drop_ratio > self.RESTART_INDICATORS['altitude_drop_ratio']
+        
+        # Speed reset (aircraft suddenly stationary)
+        speed_reset = False
+        if curr.speed is not None:
+            speed_reset = curr.speed < self.RESTART_INDICATORS['speed_reset_threshold']
+        
+        # Flight restart if multiple indicators present
+        restart_score = sum([back_to_origin, altitude_reset, speed_reset])
+        return restart_score >= 2  # Need at least 2 indicators
+    
+    def _is_engine_shutdown(self, curr: FlightPoint, prev: FlightPoint, speed_ms: float) -> bool:
+        """Determine if aircraft is in engine shutdown state"""
+        
+        # Must be slow/stationary
+        if speed_ms > self.ENGINE_OFF_SPEED_MS:
+            return False
+        
+        # Prefer ground level detection if altitude available
+        if curr.ele is not None:
+            on_ground = curr.ele < self.GROUND_ALTITUDE_M
+            return on_ground
+        
+        # Fallback: just check if stationary (no altitude data)
+        return True
+    
+    def _finalize_flights(self, flight_points: List[List[FlightPoint]]) -> List[FlightSegment]:
+        """Filter and create final flight segments"""
+        flights = []
+        
+        for i, points in enumerate(flight_points):
+            if len(points) < self.MIN_POINTS:
+                continue
+            
+            # Create segment
+            segment = FlightSegment(points)
+            
+            # Apply filters
+            if (segment.distance_km < self.MIN_DISTANCE_KM or
+                (segment.duration_s and segment.duration_s < self.MIN_DURATION_MIN * 60)):
+                continue
+            
+            # Name the flight
+            segment.name = f"Flight {i + 1}"
+            
+            flights.append(segment)
+        
+        return flights
+    
+    def segments_to_display_format(self, segments: List[FlightSegment]) -> List[dict]:
+        """Convert to frontend display format"""
+        result = []
+        
+        for seg in segments:
+            positions = [[p.lat, p.lon] for p in seg.points]
+            
+            display_info = {
+                'name': seg.name,
+                'type': 'flight',
+                'positions': positions,
+                'points': len(seg.points),
+                'distance_km': round(seg.distance_km, 2),
+                'duration_min': round(seg.duration_s / 60, 1) if seg.duration_s else 0,
+                'avg_speed_kts': round(seg.avg_speed_kts, 1) if seg.avg_speed_kts else 0,
+                'max_speed_kts': round(seg.max_speed_kts, 1) if seg.max_speed_kts else 0,
+                'max_altitude_ft': round(seg.max_altitude_m * 3.28084, 0) if seg.max_altitude_m else None,
+                'start_time': seg.start_time,
+                'end_time': seg.end_time
+            }
+            
+            result.append(display_info)
+        
+        return result
+
+# Global processor instance
+track_processor = AviationTrackProcessor()
 
 def normalize_sample(st: ChannelState, callsign: str, s: LiveSample, now_ts: float) -> tuple[LiveSample, bool]:
     """Clean obvious bad data, reset paths on teleports, be gap-aware. Returns (sample, break_path)."""
@@ -544,6 +903,56 @@ async def live_history(channel: str):
         async with st.lock:
             out = { cs: (st.history.get(cs) or []) for cs in st.history.keys() }
         return {"channel": channel, "tracks": out}
+
+
+@app.get("/api/live/{channel}/segments")
+async def live_segments(channel: str):
+    """Get intelligent flight segments for a channel"""
+    st = get_channel(channel)
+    
+    async with st.lock:
+        # Get all history for all callsigns in this channel
+        all_segments = {}
+        
+        for callsign, history in st.history.items():
+            if not history:
+                continue
+                
+            # Process history into flight segments
+            segments = track_processor.process_history(history)
+            
+            # Convert to display format
+            display_segments = track_processor.segments_to_display_format(segments)
+            
+            if display_segments:
+                all_segments[callsign] = display_segments
+        
+        # Cache segments for efficiency
+        st.track_segments.update(all_segments)
+    
+    return {
+        "channel": channel,
+        "segments": all_segments,
+        "processor_config": {
+            "engine_shutdown": {
+                "time_s": track_processor.ENGINE_OFF_TIME_S,
+                "speed_ms": track_processor.ENGINE_OFF_SPEED_MS,
+                "ground_altitude_m": track_processor.GROUND_ALTITUDE_M
+            },
+            "session_gap_hours": track_processor.SESSION_GAP_HOURS,
+            "anomaly_detection": {
+                "teleport_km": track_processor.TELEPORT_THRESHOLD_KM,
+                "teleport_window_s": track_processor.TELEPORT_TIME_WINDOW_S,
+                "max_speed_ms": track_processor.MAX_REALISTIC_SPEED_MS
+            },
+            "restart_detection": track_processor.RESTART_INDICATORS,
+            "min_flight": {
+                "points": track_processor.MIN_POINTS,
+                "distance_km": track_processor.MIN_DISTANCE_KM,
+                "duration_min": track_processor.MIN_DURATION_MIN
+            }
+        }
+    }
 
 
 @app.post("/api/live/{channel}")
@@ -2059,6 +2468,23 @@ INDEX_HTML = """
             <div>
               <label class="lbl" for="live_key">Post Key (optional)</label>
               <input id="live_key" placeholder="Security key if required" />
+            </div>
+            <div>
+              <label class="lbl">Track Display</label>
+              <div style="display:flex; gap:12px; align-items:center; flex-wrap:wrap;">
+                <label style="display:flex; align-items:center; gap:6px; font-size:13px; cursor:pointer;">
+                  <input type="radio" name="track_mode" value="raw" checked /> Raw Points
+                </label>
+                <label style="display:flex; align-items:center; gap:6px; font-size:13px; cursor:pointer;">
+                  <input type="radio" name="track_mode" value="segments" /> Flight Segments
+                </label>
+                <div id="flight_selector_container" style="display:none; margin-left:16px;">
+                  <label class="lbl" for="flight_select" style="font-size:12px; margin-right:6px;">Flight</label>
+                  <select id="flight_select" class="small" style="min-width:180px;">
+                    <option value="all">Show All Flights</option>
+                  </select>
+                </div>
+              </div>
             </div>
             <div>
               <label class="lbl">Connection</label><br/>
@@ -4075,7 +4501,13 @@ INDEX_HTML = """
           // Fetch initial data and history
           fetchRecent();
           fetchInfo();
-          fetchHistory(channel);
+          // Load tracks based on selected mode
+          const trackMode = document.querySelector('input[name="track_mode"]:checked').value;
+          if (trackMode === 'segments') {
+            fetchFlightSegments();
+          } else {
+            fetchHistory(channel);
+          }
           
           // Start periodic info updates and track saving
           if (liveInfoTimer) clearInterval(liveInfoTimer);
@@ -4386,6 +4818,187 @@ INDEX_HTML = """
         }
       }
       
+      // NEW: Enhanced flight segments with aviation-smart recognition
+      async function fetchFlightSegments() {
+        try {
+          const channel = liveChInput.value || 'default';
+          const resp = await fetch(`/api/live/${encodeURIComponent(channel)}/segments`);
+          const data = await resp.json();
+          
+          // Display flight segments with rich information
+          displayFlightSegments(data.segments || {});
+          
+          pushEvent(`Loaded ${Object.keys(data.segments || {}).length} aircraft with flight segments`);
+        } catch (e) {
+          console.error('Failed to fetch flight segments:', e);
+        }
+      }
+      
+      function populateFlightSelector(segments) {
+        const flightSelect = document.getElementById('flight_select');
+        const container = document.getElementById('flight_selector_container');
+        
+        // Clear existing options except "Show All"
+        flightSelect.innerHTML = '<option value="all">Show All Flights</option>';
+        
+        let totalFlights = 0;
+        
+        // Populate dropdown with flight options
+        Object.entries(segments).forEach(([callsign, flights]) => {
+          if (!flights || flights.length === 0) return;
+          
+          flights.forEach((flight, index) => {
+            totalFlights++;
+            const flightId = `${callsign}-${index}`;
+            const option = document.createElement('option');
+            option.value = flightId;
+            
+            // Create descriptive label like the GPX converter
+            const duration = flight.duration_min ? `${flight.duration_min}min` : '';
+            const distance = flight.distance_km ? `${flight.distance_km}km` : '';
+            const points = flight.points ? `${flight.points}pts` : '';
+            const startTime = flight.start_time ? fmtTime(new Date(flight.start_time * 1000)) : '';
+            
+            const details = [duration, distance, points].filter(x => x).join(' • ');
+            const timeStr = startTime ? ` – ${startTime}` : '';
+            
+            option.textContent = `${callsign}: ${flight.name}${timeStr} (${details})`;
+            flightSelect.appendChild(option);
+          });
+        });
+        
+        // Show/hide flight selector based on available flights
+        if (totalFlights > 1) {
+          container.style.display = 'block';
+        } else {
+          container.style.display = 'none';
+        }
+      }
+      
+      function displayFlightSegments(segments) {
+        // Clear existing segment displays
+        if (window.liveSegmentLayers) {
+          Object.values(window.liveSegmentLayers).forEach(layers => {
+            layers.forEach(layer => liveMap2D.map.removeLayer(layer));
+          });
+        }
+        window.liveSegmentLayers = {};
+        
+        // Store segments for flight selector
+        window.currentFlightSegments = segments;
+        
+        // Populate flight selector dropdown
+        populateFlightSelector(segments);
+        
+        // Get selected flight filter
+        const selectedFlight = document.getElementById('flight_select').value;
+        
+        // Display each callsign's flight segments
+        Object.entries(segments).forEach(([callsign, flights]) => {
+          if (!flights || flights.length === 0) return;
+          
+          const segmentLayers = [];
+          
+          flights.forEach((flight, index) => {
+            if (!flight.positions || flight.positions.length < 2) return;
+            
+            // Check if this flight should be displayed based on selector
+            const flightId = `${callsign}-${index}`;
+            if (selectedFlight !== 'all' && selectedFlight !== flightId) {
+              return; // Skip this flight
+            }
+            
+            // Color coding by flight index
+            const colors = ['#FF6B6B', '#4ECDC4', '#45B7D1', '#96CEB4', '#FFEAA7', '#DDA0DD', '#98D8C8'];
+            const color = colors[index % colors.length];
+            
+            // Main flight track
+            const flightLine = L.polyline(flight.positions, {
+              color: color,
+              weight: 4,
+              opacity: 0.8,
+              dashArray: flight.type === 'pattern' ? '10, 5' : null,
+              bubblingMouseEvents: false
+            });
+            
+            // Enhanced tooltip with aviation info
+            const tooltipContent = `
+              <div class="flight-segment-tooltip" style="
+                background: var(--glass-bg);
+                border: 1px solid var(--glass-border);
+                border-radius: var(--md-sys-shape-corner-medium);
+                padding: 16px;
+                min-width: 280px;
+                color: var(--md-sys-color-on-surface);
+                font-family: var(--md-sys-typescale-body-medium);
+              ">
+                <div style="font-weight: 700; color: var(--md-sys-color-primary); margin-bottom: 12px;">
+                  ${callsign} - ${flight.name}
+                </div>
+                <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 8px; font-size: 13px;">
+                  <div><strong>Distance:</strong> ${flight.distance_km} km</div>
+                  <div><strong>Duration:</strong> ${flight.duration_min} min</div>
+                  <div><strong>Avg Speed:</strong> ${flight.avg_speed_kts} kts</div>
+                  <div><strong>Max Speed:</strong> ${flight.max_speed_kts} kts</div>
+                  ${flight.max_altitude_ft ? `<div><strong>Max Alt:</strong> ${flight.max_altitude_ft} ft</div>` : ''}
+                  <div><strong>Points:</strong> ${flight.points}</div>
+                </div>
+                <div style="margin-top: 8px; font-size: 12px; opacity: 0.8;">
+                  ${flight.start_time ? fmtTime(new Date(flight.start_time * 1000)) : 'Unknown start'}
+                </div>
+              </div>
+            `;
+            
+            flightLine.bindTooltip(tooltipContent, {
+              sticky: true,
+              className: 'custom-tooltip',
+              opacity: 1
+            });
+            
+            // Add hover effects
+            flightLine.on('mouseover', function() {
+              this.setStyle({ weight: 6, opacity: 1.0 });
+            });
+            flightLine.on('mouseout', function() {
+              this.setStyle({ weight: 4, opacity: 0.8 });
+            });
+            
+            flightLine.addTo(liveMap2D.map);
+            segmentLayers.push(flightLine);
+            
+            // Add start/end markers for longer flights
+            if (flight.duration_min > 10) {
+              const startPos = flight.positions[0];
+              const endPos = flight.positions[flight.positions.length - 1];
+              
+              // Start marker (green)
+              const startMarker = L.circleMarker(startPos, {
+                radius: 6,
+                fillColor: '#2ECC71',
+                color: '#27AE60',
+                weight: 2,
+                fillOpacity: 0.8
+              }).bindTooltip(`Flight Start: ${callsign}`, { className: 'custom-tooltip' });
+              
+              // End marker (red)
+              const endMarker = L.circleMarker(endPos, {
+                radius: 6,
+                fillColor: '#E74C3C', 
+                color: '#C0392B',
+                weight: 2,
+                fillOpacity: 0.8
+              }).bindTooltip(`Flight End: ${callsign}`, { className: 'custom-tooltip' });
+              
+              startMarker.addTo(liveMap2D.map);
+              endMarker.addTo(liveMap2D.map);
+              segmentLayers.push(startMarker, endMarker);
+            }
+          });
+          
+          window.liveSegmentLayers[callsign] = segmentLayers;
+        });
+      }
+      
       async function fetchInfo() {
         try {
           const channel = liveChInput.value || 'default';
@@ -4536,6 +5149,20 @@ INDEX_HTML = """
       // Wrap the detailed 2D rendering logic in a function that accepts the
       // current callsign, position and optional full sample for rich tooltips.
       function renderActual2DPosition(cs, pos, sample) {
+        // Ensure live map is initialized
+        if (!liveMap2D || !liveMap2D.map) {
+          ensureLiveMap().then(() => renderActual2DPosition(cs, pos, sample));
+          return;
+        }
+        
+        // Validate position coordinates
+        if (!pos || !Array.isArray(pos) || pos.length !== 2 ||
+            !isFiniteNum(pos[0]) || !isFiniteNum(pos[1]) ||
+            Math.abs(pos[0]) > 90 || Math.abs(pos[1]) > 180) {
+          console.warn('Invalid position in renderActual2DPosition:', pos);
+          return;
+        }
+        
         const now = Date.now();
         const color = getCallsignColor(cs);
         const headingKey = `${cs}-${Math.round((sample.hdg_deg || 0) / 5) * 5}-${color}`;
@@ -5187,6 +5814,58 @@ INDEX_HTML = """
             ensureLiveMap().then(() => connectWs());
           }
         }, 1000);
+        
+        // Track mode toggle functionality
+        document.querySelectorAll('input[name="track_mode"]').forEach(radio => {
+          radio.addEventListener('change', function() {
+            const container = document.getElementById('flight_selector_container');
+            
+            if (liveConnected) {
+              // Clear existing track displays
+              if (window.liveSegmentLayers) {
+                Object.values(window.liveSegmentLayers).forEach(layers => {
+                  layers.forEach(layer => liveMap2D.map.removeLayer(layer));
+                });
+                window.liveSegmentLayers = {};
+              }
+              if (window.liveHistoricalLayers) {
+                Object.values(window.liveHistoricalLayers).forEach(layers => {
+                  layers.forEach(layer => liveMap2D.map.removeLayer(layer));
+                });
+                window.liveHistoricalLayers = {};
+              }
+              
+              // Load new track mode
+              if (this.value === 'segments') {
+                fetchFlightSegments();
+                pushEvent('Switched to Aviation Flight Segments view');
+                // Flight selector will be shown/hidden by populateFlightSelector
+              } else {
+                const channel = liveChInput.value || 'default';
+                fetchHistory(channel);
+                container.style.display = 'none'; // Hide flight selector for raw points
+                pushEvent('Switched to Raw Track Points view');
+              }
+            } else {
+              // Handle display logic when not connected
+              if (this.value === 'segments') {
+                // Show flight selector if we have segments cached
+                if (window.currentFlightSegments && Object.keys(window.currentFlightSegments).length > 0) {
+                  populateFlightSelector(window.currentFlightSegments);
+                }
+              } else {
+                container.style.display = 'none';
+              }
+            }
+          });
+        });
+        
+        // Flight selector change handler
+        document.getElementById('flight_select').addEventListener('change', function() {
+          if (window.currentFlightSegments && document.querySelector('input[name="track_mode"]:checked').value === 'segments') {
+            displayFlightSegments(window.currentFlightSegments);
+          }
+        });
       });
       
     </script>

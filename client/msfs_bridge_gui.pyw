@@ -685,7 +685,7 @@ class MainWindow(QMainWindow):
             log_file = os.path.join(tmpdir, 'flighttracepro_test_update.log')
             
             with open(bat, 'w') as bf:
-                bf.write(f"""@echo off
+                bf.write(fr"""@echo off
 title FlightTracePro Test Updater
 
 REM Define paths as variables
@@ -845,7 +845,7 @@ del "%~f0" >nul 2>&1
             log_safe = batch_escape(log_file)
             
             with open(bat, 'w') as bf:
-                bf.write(f"""@echo off
+                bf.write(fr"""@echo off
 setlocal enabledelayedexpansion
 title FlightTracePro Updater
 
@@ -1021,36 +1021,51 @@ set PYTHONHOME=
 set PYTHONPATH=
 set PYTHONNOUSERSITE=
 set VIRTUAL_ENV=
+REM Set temp directory to a clean location to avoid DLL conflicts
+set TEMP=%LOCALAPPDATA%\FlightTraceProTemp
+set TMP=%LOCALAPPDATA%\FlightTraceProTemp
+if not exist "%TEMP%" mkdir "%TEMP%"
 set CONDA_PREFIX=
 set __PYVENV_LAUNCHER__=
 
-REM Small delay to allow AV/indexer to release the new EXE
-timeout /t 2 /nobreak >nul
-
-REM Start application with explicit working directory
-start "" /D "%TARGET_DIR%" %TARGET_EXE%
-if errorlevel 1 (
-    echo [%date% %time%] ERROR: Failed to start application >> %LOGFILE%
-    echo ERROR: Failed to start application!
-    pause
-    exit /b 1
-) else (
-    echo [%date% %time%] First start command issued >> %LOGFILE%
+REM Ensure TEMP/TMP point to local user temp (if available)
+if defined LOCALAPPDATA (
+    set TEMP=%LOCALAPPDATA%\Temp
+    set TMP=%LOCALAPPDATA%\Temp
 )
+
+REM Warm up runtime via --version to pre-extract and pass AV
+set WARM_TRY=0
+:warmup_loop
+set /a WARM_TRY+=1
+"%TARGET_NOQUOTE%" --version >nul 2>&1
+if errorlevel 1 (
+    if %WARM_TRY% LSS 6 (
+        echo [%date% %time%] Warmup attempt %WARM_TRY% failed; waiting... >> %LOGFILE%
+        timeout /t 2 /nobreak >nul
+        goto warmup_loop
+    ) else (
+        echo [%date% %time%] Warmup failed after %WARM_TRY% attempts; continuing... >> %LOGFILE%
+    )
+) else (
+    echo [%date% %time%] Warmup succeeded on attempt %WARM_TRY% >> %LOGFILE%
+)
+
+REM Start application exactly like double-clicking using explorer
+echo [%date% %time%] Launching application via explorer... >> %LOGFILE%
+explorer "%TARGET_NOQUOTE%"
+echo [%date% %time%] Launch command issued >> %LOGFILE%
 
 REM Verify process is running, retry once if not
 for %%I in ("%TARGET_NOQUOTE%") do set EXE_NAME=%%~nxI
-timeout /t 2 /nobreak >nul
+timeout /t 3 /nobreak >nul
 tasklist /FI "IMAGENAME eq %EXE_NAME%" | find /I "%EXE_NAME%" >nul
 if errorlevel 1 (
     echo [%date% %time%] Process not detected; retrying start after AV settle... >> %LOGFILE%
-    timeout /t 4 /nobreak >nul
-    start "" /D "%TARGET_DIR%" %TARGET_EXE%
-    if errorlevel 1 (
-        echo [%date% %time%] ERROR: Retry start failed >> %LOGFILE%
-    ) else (
-        echo [%date% %time%] Retry start command issued >> %LOGFILE%
-    )
+    timeout /t 5 /nobreak >nul
+    echo [%date% %time%] Retrying launch via explorer... >> %LOGFILE%
+    explorer "%TARGET_NOQUOTE%"
+    echo [%date% %time%] Retry launch command issued >> %LOGFILE%
 )
 
 echo.
