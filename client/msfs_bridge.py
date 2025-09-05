@@ -293,7 +293,7 @@ def main():
     ap.add_argument("--callsign", default="N123AB", help="Your callsign/label")
     ap.add_argument("--key", default=None, help="Optional post key if server requires")
     ap.add_argument("--mode", choices=["ws", "http"], default="ws", help="Transport: ws (websocket) or http")
-    ap.add_argument("--rate", type=float, default=2.0, help="Update rate in Hz (e.g. 2 = every 0.5s)")
+    ap.add_argument("--rate", type=float, default=10.0, help="Update rate in Hz (e.g. 10 = every 0.1s for smooth flight)")
     ap.add_argument("--demo", action="store_true", help="Simulate data without MSFS")
     ap.add_argument("--origin-lat", type=float, default=47.3769)
     ap.add_argument("--origin-lon", type=float, default=8.5417)

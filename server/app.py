@@ -4,6 +4,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from datetime import datetime, timezone
+from pathlib import Path
 import logging
 import asyncio
 import gpxpy
@@ -12,6 +13,14 @@ from io import StringIO, BytesIO
 from typing import Optional
 from uuid import uuid4
 import os
+import json
+import time
+from typing import Dict, List
+
+# Database (PostgreSQL via SQLAlchemy async)
+from sqlalchemy import String, Float, Boolean, BigInteger, Index, select, func
+from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
+from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker, AsyncSession
 
 
 app = FastAPI(title="FlightTracePro – GPX→KML + Live", version="1.1.0")
@@ -63,6 +72,9 @@ class ChannelState:
         self.history_max = 5000
         # per-callsign filter state
         self.filters: dict[str, dict] = {}
+        # persistence state
+        self._last_persist_ts: float = 0.0
+        self._dirty: bool = False
 
 def _haversine_m(lat1, lon1, lat2, lon2):
     from math import radians, sin, cos, sqrt, atan2
@@ -123,15 +135,105 @@ def normalize_sample(st: ChannelState, callsign: str, s: LiveSample, now_ts: flo
 
 CHANNELS: dict[str, ChannelState] = {}
 
+# Persistence helpers (per-channel JSON files)
+DATA_DIR = Path(os.environ.get("FTPRO_DATA_DIR", "server/data"))
+try:
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+except Exception:
+    pass
+
+def _sanitize_channel(name: str) -> str:
+    s = ''.join(ch for ch in name if (ch.isalnum() or ch in ('_', '-')))
+    return s or "default"
+
+def _channel_history_path(channel: str) -> Path:
+    return DATA_DIR / f"history_{_sanitize_channel(channel)}.json"
+
+def _load_history(channel: str, st: ChannelState) -> None:
+    p = _channel_history_path(channel)
+    if not p.exists():
+        return
+    try:
+        with p.open("r", encoding="utf-8") as fh:
+            data = json.load(fh)
+        hist = data.get("history") if isinstance(data, dict) else None
+        if isinstance(hist, dict):
+            # ensure lists
+            for k, v in list(hist.items()):
+                if not isinstance(v, list):
+                    hist.pop(k, None)
+            st.history = hist
+    except Exception as e:
+        try:
+            logger.warning("failed to load history for %s: %s", channel, e)
+        except Exception:
+            pass
+
+def _save_history(channel: str, st: ChannelState) -> None:
+    # Write atomically via temp file
+    p = _channel_history_path(channel)
+    tmp = p.with_suffix(p.suffix + ".tmp")
+    try:
+        payload = {"channel": channel, "saved_at": datetime.now(timezone.utc).isoformat(), "history": st.history}
+        with tmp.open("w", encoding="utf-8") as fh:
+            json.dump(payload, fh, ensure_ascii=False)
+        tmp.replace(p)
+        st._dirty = False
+        st._last_persist_ts = time.monotonic()
+    except Exception as e:
+        try:
+            logger.warning("failed to save history for %s: %s", channel, e)
+        except Exception:
+            pass
+
+def _maybe_persist_locked(channel: str, st: ChannelState, interval: float = 2.0) -> None:
+    if USE_DB:
+        return  # DB-backed; skip JSON persistence
+    st._dirty = True
+    now = time.monotonic()
+    last = st._last_persist_ts or 0.0
+    if (now - last) >= interval:
+        _save_history(channel, st)
+
 def get_channel(name: str) -> ChannelState:
     st = CHANNELS.get(name)
     if not st:
         st = ChannelState()
         CHANNELS[name] = st
+        # Load persisted history only when not using DB
+        if not USE_DB:
+            _load_history(name, st)
     return st
 
 LIVE_POST_KEY = os.environ.get("LIVE_POST_KEY", "").strip()
 LIVE_TTL_SEC = int(os.environ.get("LIVE_TTL_SEC", "60") or "60")
+DATABASE_URL = os.environ.get("DATABASE_URL", "").strip()
+USE_DB = bool(DATABASE_URL)
+
+# SQLAlchemy models and engine
+class Base(DeclarativeBase):
+    pass
+
+class TrackPoint(Base):
+    __tablename__ = "track_points"
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    channel: Mapped[str] = mapped_column(String(64), index=True)
+    callsign: Mapped[str] = mapped_column(String(64), index=True)
+    ts: Mapped[float] = mapped_column(Float)
+    lat: Mapped[float] = mapped_column(Float)
+    lon: Mapped[float] = mapped_column(Float)
+    alt_m: Mapped[float | None] = mapped_column(Float, nullable=True)
+    spd_kt: Mapped[float | None] = mapped_column(Float, nullable=True)
+    vsi_ms: Mapped[float | None] = mapped_column(Float, nullable=True)
+    hdg_deg: Mapped[float | None] = mapped_column(Float, nullable=True)
+    pitch_deg: Mapped[float | None] = mapped_column(Float, nullable=True)
+    roll_deg: Mapped[float | None] = mapped_column(Float, nullable=True)
+    break_path: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+
+Index("idx_track_channel_callsign_ts", TrackPoint.channel, TrackPoint.callsign, TrackPoint.ts)
+
+engine = create_async_engine(DATABASE_URL) if USE_DB else None
+async_session = async_sessionmaker(engine, expire_on_commit=False) if USE_DB else None
 
 
 async def _broadcast_viewers(st: ChannelState, data: dict):
@@ -393,9 +495,55 @@ async def live_info(channel: str):
 @app.get("/api/live/{channel}/history")
 async def live_history(channel: str):
     st = get_channel(channel)
-    async with st.lock:
-        out = { cs: (st.history.get(cs) or []) for cs in st.active_callsigns }
-    return {"channel": channel, "tracks": out}
+    # Prefer DB if available
+    if USE_DB:
+        # Build tracks grouped by callsign, limited per callsign to history_max
+        result: Dict[str, List[dict]] = {}
+        try:
+            async with async_session() as session:
+                # Find callsigns present in channel
+                q_cs = select(TrackPoint.callsign).where(TrackPoint.channel == channel).distinct()
+                callsigns = [row[0] for row in (await session.execute(q_cs)).all()]
+                maxn = st.history_max
+                for cs in callsigns:
+                    # last N points per callsign ordered ascending by ts
+                    q = (
+                        select(TrackPoint)
+                        .where((TrackPoint.channel == channel) & (TrackPoint.callsign == cs))
+                        .order_by(TrackPoint.ts.desc())
+                        .limit(maxn)
+                    )
+                    rows = (await session.execute(q)).scalars().all()
+                    rows.sort(key=lambda r: r.ts)
+                    result[cs] = [
+                        {
+                            "lat": r.lat,
+                            "lon": r.lon,
+                            "alt_m": r.alt_m,
+                            "spd_kt": r.spd_kt,
+                            "vsi_ms": r.vsi_ms,
+                            "hdg_deg": r.hdg_deg,
+                            "pitch_deg": r.pitch_deg,
+                            "roll_deg": r.roll_deg,
+                            "ts": r.ts,
+                            "callsign": r.callsign,
+                            "break_path": r.break_path,
+                        }
+                        for r in rows
+                    ]
+        except Exception as e:
+            try:
+                logger.warning("history db error for %s: %s", channel, e)
+            except Exception:
+                pass
+            # fall back to in-memory
+            async with st.lock:
+                result = { cs: (st.history.get(cs) or []) for cs in st.history.keys() }
+        return {"channel": channel, "tracks": result}
+    else:
+        async with st.lock:
+            out = { cs: (st.history.get(cs) or []) for cs in st.history.keys() }
+        return {"channel": channel, "tracks": out}
 
 
 @app.post("/api/live/{channel}")
@@ -421,6 +569,33 @@ async def live_post(channel: str, sample: LiveSample, key: str | None = None):
         if len(hist) > st.history_max:
             del hist[: len(hist) - st.history_max]
         st.history[callsign] = hist
+        _maybe_persist_locked(channel, st)
+    # Persist to DB (non-blocking for channel lock)
+    if USE_DB:
+        try:
+            async with async_session() as session:
+                session: AsyncSession
+                tp = TrackPoint(
+                    channel=channel,
+                    callsign=callsign,
+                    ts=float(sample.ts or now),
+                    lat=float(sample.lat),
+                    lon=float(sample.lon),
+                    alt_m=float(sample.alt_m) if sample.alt_m is not None else None,
+                    spd_kt=float(sample.spd_kt) if sample.spd_kt is not None else None,
+                    vsi_ms=float(sample.vsi_ms) if sample.vsi_ms is not None else None,
+                    hdg_deg=float(sample.hdg_deg) if sample.hdg_deg is not None else None,
+                    pitch_deg=float(sample.pitch_deg) if sample.pitch_deg is not None else None,
+                    roll_deg=float(sample.roll_deg) if sample.roll_deg is not None else None,
+                    break_path=bool(break_path),
+                )
+                session.add(tp)
+                await session.commit()
+        except Exception as e:
+            try:
+                logger.warning("db insert error: %s", e)
+            except Exception:
+                pass
         # broadcast to viewers only
         payload = sample.dict(); payload['break_path'] = break_path
         data = {"type": "state", "payload": payload}
@@ -514,6 +689,33 @@ async def ws_live(websocket: WebSocket, channel: str):
                 if len(hist) > st.history_max:
                     del hist[: len(hist) - st.history_max]
                 st.history[callsign] = hist
+                _maybe_persist_locked(channel, st)
+            # Persist to DB outside lock
+            if USE_DB:
+                try:
+                    async with async_session() as session:
+                        session: AsyncSession
+                        tp = TrackPoint(
+                            channel=channel,
+                            callsign=callsign,
+                            ts=float(sample.ts or now),
+                            lat=float(sample.lat),
+                            lon=float(sample.lon),
+                            alt_m=float(sample.alt_m) if sample.alt_m is not None else None,
+                            spd_kt=float(sample.spd_kt) if sample.spd_kt is not None else None,
+                            vsi_ms=float(sample.vsi_ms) if sample.vsi_ms is not None else None,
+                            hdg_deg=float(sample.hdg_deg) if sample.hdg_deg is not None else None,
+                            pitch_deg=float(sample.pitch_deg) if sample.pitch_deg is not None else None,
+                            roll_deg=float(sample.roll_deg) if sample.roll_deg is not None else None,
+                            break_path=bool(break_path),
+                        )
+                        session.add(tp)
+                        await session.commit()
+                except Exception as e:
+                    try:
+                        logger.warning("db insert error: %s", e)
+                    except Exception:
+                        pass
                 payload = sample.dict(); payload['break_path'] = break_path
                 data = {"type": "state", "payload": payload}
                 await _broadcast_viewers(st, data)
@@ -1660,7 +1862,7 @@ INDEX_HTML = """
           <h1>GPX to KML Converter</h1>
           <p>Transform your GPS tracks into Google Earth-compatible KML files with advanced styling and 3D visualization options.</p>
           
-          <form id="form">
+          <form id="form" method="post" enctype="multipart/form-data">
             <label for="file">GPX file</label>
             <input id="file" name="file" type="file" accept=".gpx,application/gpx+xml" required />
 
@@ -2057,6 +2259,308 @@ INDEX_HTML = """
         previewFile(f);
       });
 
+      // Form submission handler
+      form.addEventListener('submit', async (e) => {
+        e.preventDefault();
+        statusEl.textContent = 'Converting...';
+        btn.disabled = true;
+        
+        try {
+          const formData = new FormData(form);
+          const response = await fetch('/api/convert_link', {
+            method: 'POST',
+            body: formData
+          });
+          
+          if (!response.ok) {
+            const errorData = await response.json();
+            throw new Error(errorData.detail || `HTTP ${response.status}`);
+          }
+          
+          const result = await response.json();
+          statusEl.textContent = 'Conversion complete!';
+          
+          // Update "Open in Google Earth" button
+          const openBtn = document.getElementById('open_ge');
+          if (openBtn && result.url) {
+            openBtn.onclick = async () => {
+              try {
+                // Try to determine if this is accessible externally
+                const isLocalhost = window.location.hostname === 'localhost' || 
+                                  window.location.hostname === '127.0.0.1' || 
+                                  window.location.hostname.startsWith('192.168.') ||
+                                  window.location.hostname.startsWith('10.') ||
+                                  window.location.hostname.includes('local');
+                
+                if (!isLocalhost) {
+                  // Try Google Earth Web with public URL
+                  const kmlUrl = new URL(result.url, window.location.origin).href;
+                  const earthUrl = `https://earth.google.com/web/@0,0,0a,0d,0y,0t,0r?url=${encodeURIComponent(kmlUrl)}`;
+                  window.open(earthUrl, '_blank');
+                  statusEl.textContent = 'Opened in Google Earth Web';
+                } else {
+                  // Local development - download the file
+                  const kmlResponse = await fetch(result.url);
+                  const kmlBlob = await kmlResponse.blob();
+                  
+                  // Create download link
+                  const downloadUrl = URL.createObjectURL(kmlBlob);
+                  const downloadLink = document.createElement('a');
+                  downloadLink.href = downloadUrl;
+                  downloadLink.download = result.filename || 'flight.kml';
+                  
+                  // Show user-friendly message
+                  statusEl.textContent = 'KML file downloaded - open with Google Earth Pro or upload to earth.google.com/web';
+                  
+                  // Auto-download
+                  document.body.appendChild(downloadLink);
+                  downloadLink.click();
+                  document.body.removeChild(downloadLink);
+                  URL.revokeObjectURL(downloadUrl);
+                }
+              } catch (error) {
+                statusEl.textContent = `Error: ${error.message}`;
+              }
+            };
+            openBtn.disabled = false;
+          }
+          
+          // Auto-preview the file if one was uploaded
+          const fileInput = document.getElementById('file');
+          if (fileInput.files && fileInput.files[0]) {
+            previewFile(fileInput.files[0]);
+          }
+          
+        } catch (error) {
+          statusEl.textContent = `Error: ${error.message}`;
+        } finally {
+          btn.disabled = false;
+        }
+      });
+
+      // Convert button click handler (prefer trusted submission)
+      btn.addEventListener('click', (e) => {
+        e.preventDefault();
+        if (typeof form.requestSubmit === 'function') {
+          form.requestSubmit();
+        } else {
+          // Fallback for very old browsers
+          form.dispatchEvent(new Event('submit', { cancelable: true }));
+        }
+      });
+
+      // File input change handler for preview
+      fileInput.addEventListener('change', (e) => {
+        if (e.target.files && e.target.files[0]) {
+          previewFile(e.target.files[0]);
+        }
+      });
+
+      // Preview file function (multi-track with labeling and auto-selection)
+      let __previewBusy = false;
+      async function previewFile(file, preserveSelection=false) {
+        if (!file || !file.name || !file.name.toLowerCase().endsWith('.gpx')) {
+          statusEl.textContent = 'Please select a .gpx file';
+          return;
+        }
+        if (__previewBusy) {
+          // Avoid concurrent renders that can race with resize/layout
+          return;
+        }
+        __previewBusy = true;
+        statusEl.textContent = 'Loading preview...';
+        try {
+          const text = await file.text();
+          const { tracks, waypoints } = parseGpx(text);
+          lastFileBlob = file;
+          // Populate track selector
+          const prevSel = preserveSelection ? trackSelect.value : 'auto';
+          trackSelect.innerHTML = '<option value="auto">Auto</option>';
+          const trackStats = tracks.map((t, idx) => {
+            const seg0 = (t.segments && t.segments[0]) ? t.segments[0] : [];
+            const p0 = seg0[0] || null;
+            const country = p0 ? (countryAt(p0.lat, p0.lon) || null) : null;
+            const tstr = p0 ? (fmtTime(p0.time) || null) : null;
+            const label = `${country ? country : 'Flight'}${tstr ? ' – '+tstr : ''}`;
+            return { idx, points: t.segments.reduce((n,s)=>n+s.length,0), label };
+          });
+          trackStats.forEach(ts => {
+            const opt = document.createElement('option');
+            opt.value = String(ts.idx);
+            opt.textContent = `${ts.idx+1}: ${ts.label} (${ts.points} pts)`;
+            trackSelect.appendChild(opt);
+          });
+          if (preserveSelection && trackStats.some(ts => String(ts.idx) === prevSel)) {
+            trackSelect.value = prevSel;
+          }
+          const pickTrack = () => {
+            const sel = trackSelect.value;
+            if (sel === 'auto') {
+              return tracks.reduce((a,b) => (a.segments.reduce((n,s)=>n+s.length,0) >= b.segments.reduce((n,s)=>n+s.length,0)) ? a : b, tracks[0] || {segments:[], legs:[]});
+            }
+            const t = tracks[Number(sel)];
+            return t || {segments:[], legs:[]};
+          };
+          const chosen = pickTrack();
+          // Ensure preview visible but keep current tab (2D or 3D) as-is
+          document.getElementById('preview').style.display = 'block';
+          await ensureMap();
+          // Wait until map container has non-zero size to avoid Leaflet path clipping errors
+          const mapEl = document.getElementById('map');
+          let tries = 0;
+          while (tries < 20) {
+            try {
+              const rect = mapEl.getBoundingClientRect();
+              const size = map.getSize();
+              if (rect.width > 0 && rect.height > 0 && size.x > 0 && size.y > 0) break;
+            } catch(_) {}
+            await new Promise(r => setTimeout(r, 16));
+            tries++;
+          }
+          try { map.invalidateSize(true); } catch(_) {}
+          // Draw 2D
+          const includeWpts = document.getElementById('include_waypoints').value === '1';
+          const color = document.getElementById('color').value || '#ff0000';
+          const width = parseInt(document.getElementById('width').value || '3', 10);
+          const colorBy = document.getElementById('color_by').value || 'solid';
+          const group = [];
+          const isFiniteNum = (n) => typeof n === 'number' && Number.isFinite(n);
+          const isValidLL = (lat, lon) => isFiniteNum(lat) && isFiniteNum(lon) && Math.abs(lat) <= 90 && Math.abs(lon) <= 180;
+          const safeAddPolyline = (latlngs, opts) => {
+            try {
+              const clean = (latlngs || []).filter(ll => Array.isArray(ll) && isValidLL(ll[0], ll[1]));
+              if (clean.length < 2) return null;
+              const pl = L.polyline(clean, opts);
+              trackLayer.addLayer(pl);
+              return pl;
+            } catch (e) {
+              console.warn('skip bad polyline', e);
+              return null;
+            }
+          };
+          const safeAddMarker = (lat, lon) => {
+            try {
+              if (!isValidLL(lat, lon)) return null;
+              const m = L.marker([lat, lon]);
+              wptLayer.addLayer(m);
+              return m;
+            } catch (e) { console.warn('skip bad marker', e); return null; }
+          };
+          if (trackLayer) trackLayer.clearLayers();
+          if (wptLayer) wptLayer.clearLayers();
+          // Precompute bounds from raw coordinates first, then add layers (avoids race during animations)
+          const allLatLngs = [];
+          if (chosen.segments.length) {
+            chosen.segments.forEach(seg => {
+              if (seg && seg.length > 0) {
+                seg.forEach(p => { if (isValidLL(p.lat, p.lon)) allLatLngs.push([p.lat, p.lon]); });
+              }
+            });
+          }
+          try {
+            if (allLatLngs.length > 1) {
+              const bounds = L.latLngBounds(allLatLngs);
+              if (bounds && bounds.isValid && bounds.isValid()) {
+                map.fitBounds(bounds, { padding: [20,20], animate: false });
+              } else {
+                map.setView(allLatLngs[0], 12, { animate: false });
+              }
+            } else if (allLatLngs.length === 1) {
+              map.setView(allLatLngs[0], 12, { animate: false });
+            }
+          } catch(_) {}
+
+          if (chosen.segments.length) {
+            if (colorBy === 'speed' && chosen.legs && chosen.legs.length) {
+              const speeds = chosen.legs.map(l => l.speed).filter(s => s !== null);
+              const smin = speeds.length ? Math.min(...speeds) : 0;
+              const smax = speeds.length ? Math.max(...speeds) : 1;
+              const lerp = (a,b,t) => a + (b-a)*t;
+              const speedColor = (s) => {
+                if (s === null) return color;
+                const t = (s - smin) / Math.max(1e-6, (smax - smin));
+                const r = Math.round(lerp(0,255,t));
+                const g = Math.round(lerp(114,0,t));
+                const b = Math.round(lerp(255,0,t));
+                return `rgb(${r},${g},${b})`;
+              };
+              chosen.legs.forEach(({a,b,speed}) => {
+                const pl = safeAddPolyline([[a.lat,a.lon],[b.lat,b.lon]], { color: speedColor(speed), weight: width });
+                if (pl) group.push(pl);
+              });
+            } else {
+              chosen.segments.forEach(seg => {
+                if (seg.length > 1) {
+                  const latlngs = seg.map(p => [p.lat, p.lon]);
+                  const pl = safeAddPolyline(latlngs, { color, weight: width });
+                  if (pl) group.push(pl);
+                }
+              });
+            }
+          }
+          if (includeWpts && waypoints.length) {
+            waypoints.forEach(w => {
+              const m = safeAddMarker(w.lat, w.lon);
+              if (m) { try { m.bindPopup(w.name); } catch(_) {} group.push(m); }
+            });
+          }
+          // No extra fitBounds here; we already fitted using raw points above with animate:false
+          // Draw 3D
+          ensureGlobe(() => {
+            try {
+              // Clear previous 3D tracks
+              if (globeTracks && globeTracks.length) {
+                globeTracks.forEach(ent => { try { globeViewer.entities.remove(ent); } catch(_) {} });
+                globeTracks = [];
+              }
+              let longestSeg = [];
+              const C = Cesium;
+              const toColor = (c) => C.Color.fromCssColorString(c);
+              if (colorBy === 'speed' && chosen.legs && chosen.legs.length) {
+                const speeds = chosen.legs.map(l => l.speed).filter(s => s !== null);
+                const smin = speeds.length ? Math.min(...speeds) : 0;
+                const smax = speeds.length ? Math.max(...speeds) : 1;
+                const lerp = (a,b,t) => a + (b-a)*t;
+                const speedColor = (s) => {
+                  if (s === null) return color;
+                  const t = (s - smin) / Math.max(1e-6, (smax - smin));
+                  const r = Math.round(lerp(0,255,t));
+                  const g = Math.round(lerp(114,0,t));
+                  const b = Math.round(lerp(255,0,t));
+                  return `rgb(${r},${g},${b})`;
+                };
+                chosen.legs.forEach(({a,b,speed}) => {
+                  const positions = [C.Cartesian3.fromDegrees(a.lon,a.lat,a.ele||0), C.Cartesian3.fromDegrees(b.lon,b.lat,b.ele||0)];
+                  const ent = globeViewer.entities.add({ polyline: { positions, width: width, material: toColor(speedColor(speed)), clampToGround: false } });
+                  globeTracks.push(ent);
+                });
+                longestSeg = (chosen.segments && chosen.segments[0]) ? chosen.segments[0] : [];
+              } else {
+                (chosen.segments||[]).forEach(seg => {
+                  if (seg.length > 1) {
+                    const positions = seg.map(p => C.Cartesian3.fromDegrees(p.lon,p.lat,p.ele||0));
+                    const ent = globeViewer.entities.add({ polyline: { positions, width: width, material: toColor(color), clampToGround: false } });
+                    globeTracks.push(ent);
+                    if (seg.length > longestSeg.length) longestSeg = seg;
+                  }
+                });
+              }
+              // Prepare simple flythrough data and focus camera
+              globePositions = longestSeg.map(p => ({lat:p.lat, lon:p.lon, ele:p.ele||0}));
+              try {
+                const ents = globeTracks.slice();
+                if (ents.length) globeViewer.flyTo(ents, { duration: 0.6 });
+              } catch(_) {}
+              setupFlyUI();
+            } catch (e) { console.error('3D preview error:', e); }
+          });
+          statusEl.textContent = `Loaded ${tracks.reduce((n,t)=>n+t.segments.reduce((m,s)=>m+s.length,0),0)} points in ${tracks.length} tracks`;
+        } catch (error) {
+          statusEl.textContent = `Error reading GPX: ${error.message}`;
+          console.error('GPX preview error:', error);
+        } finally { __previewBusy = false; }
+      }
+
       // Enhanced map interaction detection for follow mode
       let userInteractionFlag = false;
       let interactionTimeout = null;
@@ -2094,6 +2598,11 @@ INDEX_HTML = """
       function releaseCamera(){ try { if (globeViewer) globeViewer.camera.lookAtTransform(Cesium.Matrix4.IDENTITY); } catch(_) {} }
       function setFollowCam(v){ followCam = !!v; updateFollowBtn(); if (!followCam) { releaseCamera(); } try { window.__cfgControls && window.__cfgControls(); } catch(_) {} }
       const trackSelect = document.getElementById('track_select');
+      if (trackSelect) {
+        trackSelect.addEventListener('change', () => {
+          if (lastFileBlob) previewFile(lastFileBlob, true);
+        });
+      }
       const showPlan = document.getElementById('show_plan');
       const showAirspaces = document.getElementById('show_airspaces');
       const showAirports = document.getElementById('show_airports');
@@ -2107,14 +2616,247 @@ INDEX_HTML = """
       const mapDiv = document.getElementById('map');
       const globeDiv = document.getElementById('globe');
       let leafletReady = null;
+      let cesiumReady = null;
       // Optional country lookup from static JSON (coarse bboxes)
       let countryIndex = null;
       fetch('/static/country-bboxes.json').then(r=>r.ok?r.json():null).then(j=>{ countryIndex=j; }).catch(()=>{});
+      function countryAt(lat, lon) {
+        if (!countryIndex) return null;
+        for (const c of countryIndex) {
+          if (lon >= c.minLon && lon <= c.maxLon && lat >= c.minLat && lat <= c.maxLat) return c.name;
+        }
+        return null;
+      }
+      function fmtTime(d) {
+        if (!(d instanceof Date) || isNaN(d.getTime())) return null;
+        try { return d.toLocaleString(); } catch(_) { return d.toISOString(); }
+      }
+
+      // Robust GPX parser with multi-track recognition and splitting
+      function parseGpx(text) {
+        const dom = new DOMParser().parseFromString(text, 'application/xml');
+        const toNum = v => Number.parseFloat(v);
+        const isValid = (lat, lon) => Number.isFinite(lat) && Number.isFinite(lon) && Math.abs(lat) <= 90 && Math.abs(lon) <= 180;
+        const parseTime = (el) => {
+          const t = el && el.querySelector ? el.querySelector('time') : null;
+          if (!t) return null;
+          const d = new Date(t.textContent.trim());
+          return isNaN(d.getTime()) ? null : d;
+        };
+        function splitByMeridian(points) {
+          if (!points || points.length < 2) return points && points.length ? [points] : [];
+          const segs = [];
+          let cur = [points[0]];
+          for (let i = 1; i < points.length; i++) {
+            const prev = cur[cur.length - 1];
+            const p = points[i];
+            if (Math.abs(p.lon - prev.lon) > 180) { // lon jump
+              if (cur.length > 1) segs.push(cur);
+              cur = [p];
+            } else {
+              cur.push(p);
+            }
+          }
+          if (cur.length > 1) segs.push(cur);
+          return segs;
+        }
+        function smartSplit(points) {
+          if (!points || points.length < 2) return [];
+          const segs = [];
+          const GAP_S = 300;       // 5 minutes gap splits
+          const STOP_SPEED = 0.5;  // m/s consider stationary below this
+          const STOP_MIN_S = 60;   // 1 minute stationary splits
+          const MAX_SPEED = 150;   // m/s (540 km/h) split if exceeded
+          const BIG_JUMP_M = 250000; // 250 km jump also splits
+          const R = 6371000.0;
+          const toRad = (x) => x * Math.PI / 180;
+          const haversine = (p1, p2) => {
+            const lat1 = toRad(p1.lat), lon1 = toRad(p1.lon);
+            const lat2 = toRad(p2.lat), lon2 = toRad(p2.lon);
+            const dlat = lat2 - lat1, dlon = lon2 - lon1;
+            const a = Math.sin(dlat/2)**2 + Math.cos(lat1)*Math.cos(lat2)*Math.sin(dlon/2)**2;
+            const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+            return R * c;
+          };
+          let cur = [points[0]];
+          let stopAccum = 0;
+          for (let i=1;i<points.length;i++){
+            const a = points[i-1], b = points[i];
+            const dt = (a.time && b.time) ? Math.max(0, (b.time - a.time) / 1000) : null;
+            const dist = haversine(a, b);
+            const spd = (dt && dt > 0) ? (dist / dt) : null;
+            const gap = (dt !== null && dt > GAP_S);
+            const bigJump = dist > BIG_JUMP_M;
+            const tooFast = (spd !== null && spd > MAX_SPEED);
+            if (spd !== null && spd < STOP_SPEED) { stopAccum += dt || 0; } else { stopAccum = 0; }
+            const stationaryTooLong = stopAccum >= STOP_MIN_S;
+            if (gap || bigJump || tooFast || stationaryTooLong) {
+              if (cur.length > 1) segs.push(cur);
+              cur = [b];
+              stopAccum = 0;
+            } else {
+              cur.push(b);
+            }
+          }
+          if (cur.length > 1) segs.push(cur);
+          return segs;
+        }
+        const tracksOut = [];
+        const tracks = Array.from(dom.querySelectorAll('trk'));
+        if (tracks.length) {
+          tracks.forEach(trk => {
+            const _trkNameEl = trk.querySelector('name');
+            const trkName = (_trkNameEl && _trkNameEl.textContent ? _trkNameEl.textContent.trim() : 'Track');
+            const tsegs = Array.from(trk.querySelectorAll('trkseg'));
+            let segs = [];
+            if (tsegs.length) {
+              tsegs.forEach(ts => {
+                const pts = Array.from(ts.querySelectorAll('trkpt')).map(tp => ({
+                  lat: toNum(tp.getAttribute('lat')),
+                  lon: toNum(tp.getAttribute('lon')),
+                  ele: (function(){ const _e = tp.querySelector('ele'); return toNum((_e && _e.textContent) || '0') || 0; })(),
+                  time: (function(){ const _t = tp.querySelector('time'); if(!_t) return null; const d=new Date(_t.textContent.trim()); return isNaN(d.getTime())?null:d; })()
+                })).filter(p => isValid(p.lat, p.lon));
+                splitByMeridian(pts).forEach(s => smartSplit(s).forEach(ss => segs.push(ss)));
+              });
+            } else {
+              const pts = Array.from(trk.querySelectorAll('trkpt')).map(tp => ({
+                lat: toNum(tp.getAttribute('lat')),
+                lon: toNum(tp.getAttribute('lon')),
+                ele: (function(){ const _e = tp.querySelector('ele'); return toNum((_e && _e.textContent) || '0') || 0; })(),
+                time: (function(){ const _t = tp.querySelector('time'); if(!_t) return null; const d=new Date(_t.textContent.trim()); return isNaN(d.getTime())?null:d; })()
+              })).filter(p => isValid(p.lat, p.lon));
+              splitByMeridian(pts).forEach(s => smartSplit(s).forEach(ss => segs.push(ss)));
+            }
+            const R = 6371000.0; const toRad = (x) => x * Math.PI / 180;
+            const haversine = (p1, p2) => {
+              const lat1 = toRad(p1.lat), lon1 = toRad(p1.lon);
+              const lat2 = toRad(p2.lat), lon2 = toRad(p2.lon);
+              const dlat = lat2 - lat1, dlon = lon2 - lon1;
+              const a = Math.sin(dlat/2)**2 + Math.cos(lat1)*Math.cos(lat2)*Math.sin(dlon/2)**2;
+              const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+              return R * c;
+            };
+            let flightIdx = 1;
+            for (const seg of segs) {
+              if (!seg || seg.length < 2) continue;
+              const segDuration = (() => { const t0 = seg[0].time, t1 = seg[seg.length-1].time; return (t0 && t1) ? Math.max(0, (t1 - t0) / 1000) : null; })();
+              const segDist = (() => { let d=0; for (let i=0;i<seg.length-1;i++) d += haversine(seg[i], seg[i+1]); return d; })();
+              const minPts = 8, minDist = 200; // meters
+              const avgSpd = (segDuration && segDuration>0) ? (segDist/segDuration) : null;
+              const isStationary = (avgSpd !== null && avgSpd < 0.5 && (segDuration||0) >= 60);
+              if (seg.length < minPts || segDist < minDist || isStationary) continue;
+              const legs = [];
+              for (let i=0;i<seg.length-1;i++) {
+                const a = seg[i], b = seg[i+1];
+                let speed = null;
+                if (a.time && b.time) {
+                  const dt = (b.time - a.time) / 1000;
+                  if (dt > 0) speed = haversine(a, b) / dt;
+                }
+                legs.push({ a, b, speed });
+              }
+              const name = `${trkName} – Flight ${flightIdx++}`;
+              tracksOut.push({ name, segments: [seg], legs });
+            }
+          });
+        } else {
+          const rpts = Array.from(dom.querySelectorAll('rtept')).map(tp => ({
+            lat: toNum(tp.getAttribute('lat')),
+            lon: toNum(tp.getAttribute('lon')),
+            ele: (function(){ const _e = tp.querySelector('ele'); return toNum((_e && _e.textContent) || '0') || 0; })(),
+            time: (function(){ const _t = tp.querySelector('time'); if(!_t) return null; const d=new Date(_t.textContent.trim()); return isNaN(d.getTime())?null:d; })()
+          })).filter(p => isValid(p.lat, p.lon));
+          const segs = [];
+          splitByMeridian(rpts).forEach(s => smartSplit(s).forEach(ss => segs.push(ss)));
+          let flightIdx = 1;
+          for (const seg of segs) {
+            if (!seg || seg.length < 2) continue;
+            const legs = [];
+            for (let i=0;i<seg.length-1;i++) legs.push({ a: seg[i], b: seg[i+1], speed: null });
+            const name = `Route – Flight ${flightIdx++}`;
+            tracksOut.push({ name, segments: [seg], legs });
+          }
+        }
+        const waypoints = Array.from(dom.querySelectorAll('wpt')).map(w => ({
+          lat: toNum(w.getAttribute('lat')),
+          lon: toNum(w.getAttribute('lon')),
+          name: (function(){ const _n = w.querySelector('name'); return (_n && _n.textContent) ? _n.textContent : 'wpt'; })()
+        })).filter(w => isValid(w.lat, w.lon));
+        return { tracks: tracksOut, waypoints };
+      }
+
+      // --- Simple 3D flythrough implementation for preview ---
+      function setupFlyUI() {
+        const canFly = globePositions && globePositions.length >= 2 && globeViewer;
+        // Enable/disable controls
+        [playBtn, pauseBtn, stopBtn, homeBtn, followBtn, flyRange, flySpeedInput, camDistInput].forEach(el => { if (el) el.disabled = !canFly; });
+        if (!canFly) return;
+        flyRange.min = 0; flyRange.max = Math.max(1, globePositions.length - 1); flyRange.step = 1;
+        flyRange.value = String(flyIndex);
+        if (!flySpeedInput.value) flySpeedInput.value = '1.5';
+
+        function posAt(i){ i = Math.max(0, Math.min(globePositions.length-1, i)); const p = globePositions[i]; return Cesium.Cartesian3.fromDegrees(p.lon,p.lat,p.ele||0); }
+
+        function ensureGlider(){
+          if (gliderEnt && !gliderEnt.isDestroyed) return gliderEnt;
+          const p0 = posAt(0);
+          gliderEnt = globeViewer.entities.add({
+            position: p0,
+            model: { uri: '/static/models/glider/Glider.glb', scale: 1.0, minimumPixelSize: 64, maximumScale: 100, runAnimations: false },
+            label: { text: 'Preview', font: '12pt sans-serif', pixelOffset: new Cesium.Cartesian2(0,-40), fillColor: Cesium.Color.YELLOW, outlineColor: Cesium.Color.BLACK, outlineWidth:2, style: Cesium.LabelStyle.FILL_AND_OUTLINE }
+          });
+          return gliderEnt;
+        }
+
+        function update3DView(){
+          const ent = ensureGlider();
+          const p = posAt(flyIndex);
+          ent.position = p;
+          if (followCam) {
+            try { globeViewer.trackedEntity = ent; } catch(_) {}
+          }
+          globeViewer.scene.requestRender();
+        }
+
+        function step(ts){
+          if (!flyPlaying) return;
+          const spd = Number(flySpeedInput.value) || 1.0;
+          flyIndex += Math.max(1, Math.floor(spd));
+          if (flyIndex >= globePositions.length) { flyIndex = globePositions.length-1; flyPlaying = false; return; }
+          flyRange.value = String(flyIndex);
+          update3DView();
+          flyReq = requestAnimationFrame(step);
+        }
+
+        // Wire buttons
+        playBtn && playBtn.addEventListener('click', () => {
+          ensureGlider();
+          if (!followCam) { try { globeViewer.trackedEntity = gliderEnt; } catch(_) {} }
+          if (!flyPlaying) { flyPlaying = true; cancelAnimationFrame(flyReq); flyReq = requestAnimationFrame(step); }
+        });
+        pauseBtn && pauseBtn.addEventListener('click', () => { flyPlaying = false; cancelAnimationFrame(flyReq); });
+        stopBtn && stopBtn.addEventListener('click', () => { flyPlaying = false; cancelAnimationFrame(flyReq); flyIndex = 0; flyRange.value = '0'; update3DView(); });
+        homeBtn && homeBtn.addEventListener('click', () => {
+          try { globeViewer.trackedEntity = undefined; } catch(_) {}
+          try {
+            // Fly to bounding sphere of current entities
+            const ents = globeTracks || [];
+            if (ents.length) globeViewer.flyTo(ents, { duration: 0.8 });
+          } catch(_) {}
+        });
+        followBtn && followBtn.addEventListener('click', () => { setFollowCam(!followCam); update3DView(); });
+        flyRange && flyRange.addEventListener('input', () => { flyIndex = Number(flyRange.value) || 0; flyPlaying = false; cancelAnimationFrame(flyReq); update3DView(); });
+        camDistInput && camDistInput.addEventListener('change', () => { /* trackedEntity handles distance via mouse; keep for future */ });
+
+        // Initial view
+        update3DView();
+      }
       
       function ensureMap() {
         if (map) return Promise.resolve();
         if (leafletReady) return leafletReady;
-        // Load Leaflet lazily and wait until ready
+        // Load Leaflet lazily and wait until the map is fully ready and sized
         leafletReady = new Promise((resolve, reject) => {
           const css = document.createElement('link');
           css.rel = 'stylesheet';
@@ -2124,28 +2866,115 @@ INDEX_HTML = """
           script.src = 'https://unpkg.com/leaflet@1.9.4/dist/leaflet.js';
           script.crossOrigin = 'anonymous';
           script.onload = () => {
-            map = L.map('map').setView([46.8, 8.2], 8);
-            L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
-              attribution: '© OpenStreetMap'
-            }).addTo(map);
-            trackLayer = L.layerGroup().addTo(map);
-            wptLayer = L.layerGroup().addTo(map);
-            planLayer = L.layerGroup().addTo(map);
-            airspaceLayer = L.layerGroup().addTo(map);
-            airportLayer = L.layerGroup().addTo(map);
-            
-            // Add interaction detection for follow mode
-            map.on('movestart', markUserInteraction);
-            map.on('zoomstart', markUserInteraction);
-            map.on('drag', markUserInteraction);
-            
-            resolve();
+            try {
+              map = L.map('map', { preferCanvas: true }).setView([46.8, 8.2], 8);
+              L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { attribution: '© OpenStreetMap' }).addTo(map);
+              trackLayer = L.layerGroup().addTo(map);
+              wptLayer = L.layerGroup().addTo(map);
+              planLayer = L.layerGroup().addTo(map);
+              airspaceLayer = L.layerGroup().addTo(map);
+              airportLayer = L.layerGroup().addTo(map);
+
+              // Interaction detection for follow mode
+              map.on('movestart', markUserInteraction);
+              map.on('zoomstart', markUserInteraction);
+              map.on('drag', markUserInteraction);
+
+              // Wait until Leaflet reports ready and container is sized
+              map.whenReady(async () => {
+                const mapEl = document.getElementById('map');
+                let tries = 0;
+                while (tries < 30) {
+                  try {
+                    const rect = mapEl.getBoundingClientRect();
+                    const size = map.getSize();
+                    if (rect.width > 0 && rect.height > 0 && size.x > 0 && size.y > 0) break;
+                  } catch(_) {}
+                  await new Promise(r => setTimeout(r, 16));
+                  tries++;
+                }
+                try { map.invalidateSize(true); } catch(_) {}
+                resolve();
+              });
+            } catch (e) {
+              reject(e);
+            }
           };
           script.onerror = reject;
           document.head.appendChild(script);
         });
         return leafletReady;
       }
+
+      // Load Cesium and initialize the preview globe
+      function ensureGlobe(cb) {
+        if (globeViewer) { cb && cb(); return Promise.resolve(); }
+        if (cesiumReady) { cesiumReady.then(() => cb && cb()); return cesiumReady; }
+        cesiumReady = new Promise((resolve, reject) => {
+          // CSS
+          const css = document.createElement('link');
+          css.rel = 'stylesheet';
+          css.href = 'https://unpkg.com/cesium/Build/Cesium/Widgets/widgets.css';
+          document.head.appendChild(css);
+          // Script
+          const script = document.createElement('script');
+          window.CESIUM_BASE_URL = 'https://unpkg.com/cesium/Build/Cesium/';
+          script.src = window.CESIUM_BASE_URL + 'Cesium.js';
+          script.crossOrigin = 'anonymous';
+          script.onload = () => {
+            try {
+              globeViewer = new Cesium.Viewer('globe', {
+                terrainProvider: new Cesium.EllipsoidTerrainProvider(),
+                animation: false, timeline: false, baseLayerPicker: false, geocoder: false, sceneModePicker: false,
+                infoBox: false, selectionIndicator: false, navigationHelpButton: false, fullscreenButton: false
+              });
+              globeViewer.scene.requestRenderMode = true;
+              globeViewer.scene.maximumRenderTimeChange = Infinity;
+              // Try Ion assets if token exists
+              (async () => {
+                try {
+                  const tok = (window.CESIUM_ION_TOKEN && window.CESIUM_ION_TOKEN !== '') ? window.CESIUM_ION_TOKEN : (localStorage.getItem('cesium_token') || '');
+                  if (tok) {
+                    Cesium.Ion.defaultAccessToken = tok;
+                    globeViewer.terrainProvider = await Cesium.createWorldTerrainAsync();
+                    const imagery = await Cesium.IonImageryProvider.fromAssetId(3);
+                    globeViewer.imageryLayers.removeAll();
+                    globeViewer.imageryLayers.addImageryProvider(imagery);
+                    try { const tiles = await Cesium.createOsmBuildingsAsync(); globeViewer.scene.primitives.add(tiles); } catch(_) {}
+                  } else {
+                    globeViewer.imageryLayers.removeAll();
+                    globeViewer.imageryLayers.addImageryProvider(new Cesium.OpenStreetMapImageryProvider({ url: 'https://tile.openstreetmap.org/' }));
+                    globeViewer.terrainProvider = new Cesium.EllipsoidTerrainProvider();
+                  }
+                } catch(_) {}
+                cb && cb();
+                resolve();
+              })();
+            } catch (e) {
+              reject(e);
+            }
+          };
+          script.onerror = reject;
+          document.body.appendChild(script);
+        });
+        return cesiumReady;
+      }
+
+      // Tab switching for converter preview (2D/3D)
+      function setTab(which) {
+        if (which === '2d') {
+          tab2d.classList.add('active'); tab3d.classList.remove('active');
+          mapDiv.classList.add('active'); globeDiv.classList.remove('active');
+          ensureMap().then(() => setTimeout(() => map && map.invalidateSize(), 50));
+        } else {
+          tab3d.classList.add('active'); tab2d.classList.remove('active');
+          globeDiv.classList.add('active'); mapDiv.classList.remove('active');
+          ensureGlobe(() => setTimeout(() => globeViewer && globeViewer.resize(), 50));
+        }
+      }
+      tab2d && tab2d.addEventListener('click', () => setTab('2d'));
+      tab3d && tab3d.addEventListener('click', () => setTab('3d'));
+      window.addEventListener('resize', () => { try { if (map) map.invalidateSize(); if (globeViewer) globeViewer.resize(); } catch(_) {} });
 
       // Live tracking variables
       const liveChInput = document.getElementById('live_channel');
@@ -2179,7 +3008,7 @@ INDEX_HTML = """
       let liveMap = null, liveLeafletReady = null;
       let liveMarkers = new Map(); // callsign -> marker
       let livePaths = new Map();   // callsign -> L.polyline
-      let liveHoverPaths = new Map();   // callsign -> hover L.polyline
+      let liveHoverPaths = new Map(); // callsign -> hover L.polyline for awesome track tooltips
       let liveTrackData = new Map(); // callsign -> array of {pos, data, timestamp}
       
       function ensureLiveMap() {
@@ -2234,6 +3063,7 @@ INDEX_HTML = """
       let live3DEntities = new Map(); // callsign -> entity
       let live3DPaths = new Map();    // callsign -> path entity
       let live3DTrackData = new Map(); // callsign -> array of track points
+      let live3DDebugAxes = new Map(); // callsign -> debug axes entities
       let live3DLastLL = new Map();   // callsign -> {lat,lon}
       
       function ensureLiveGlobe(cb) {
@@ -2289,6 +3119,87 @@ INDEX_HTML = """
               // Disable expensive visual effects
               liveGlobeViewer.scene.postProcessStages.fxaa.enabled = false;
               
+              // Seed 3D entities and paths from any existing 2D history
+              try {
+                const C = Cesium;
+                liveTrackData.forEach((points, cs) => {
+                  if (!points || points.length === 0) return;
+                  if (!live3DTrackData.has(cs)) live3DTrackData.set(cs, []);
+
+                  // Create entity/path if missing
+                  if (!live3DEntities.has(cs)) {
+                    const last = points[points.length - 1]?.data || {};
+                    const lastPos = C.Cartesian3.fromDegrees(last.lon || 0, last.lat || 0, last.alt_m || 0);
+                    const entity = liveGlobeViewer.entities.add({
+                      id: cs,
+                      name: cs,
+                      position: lastPos,
+                      orientation: C.Transforms.headingPitchRollQuaternion(
+                        lastPos,
+                        C.HeadingPitchRoll.fromDegrees(last.hdg_deg || 0, last.pitch_deg || 0, last.roll_deg || 0)
+                      ),
+                      model: {
+                        uri: '/static/models/glider/Glider.glb',
+                        scale: 1.0,
+                        minimumPixelSize: 64,
+                        maximumScale: 100,
+                        runAnimations: false
+                      },
+                      label: {
+                        text: cs,
+                        font: '12pt sans-serif',
+                        pixelOffset: new C.Cartesian2(0, -60),
+                        fillColor: C.Color.YELLOW,
+                        outlineColor: C.Color.BLACK,
+                        outlineWidth: 2,
+                        style: C.LabelStyle.FILL_AND_OUTLINE,
+                        horizontalOrigin: C.HorizontalOrigin.CENTER,
+                        verticalOrigin: C.VerticalOrigin.BOTTOM,
+                        show: true
+                      }
+                    });
+                    live3DEntities.set(cs, entity);
+
+                    const positionsProperty = new C.CallbackProperty(function() {
+                      const trackData = live3DTrackData.get(cs) || [];
+                      return trackData.map(point => point.position);
+                    }, false);
+
+                    const pathEntity = liveGlobeViewer.entities.add({
+                      id: cs + '_path',
+                      name: cs + ' Flight Path',
+                      polyline: {
+                        positions: positionsProperty,
+                        width: 3,
+                        material: new C.PolylineGlowMaterialProperty({
+                          glowPower: 0.2,
+                          color: C.Color.fromCssColorString(getCallsignColor(cs))
+                        }),
+                        clampToGround: false,
+                        followSurface: false,
+                        arcType: C.ArcType.NONE,
+                        granularity: C.Math.RADIANS_PER_DEGREE,
+                        show: true
+                      }
+                    });
+                    live3DPaths.set(cs, pathEntity);
+                  }
+
+                  // Fill positions from stored 2D points
+                  const arr = live3DTrackData.get(cs);
+                  arr.length = 0;
+                  points.forEach(p => {
+                    const d = p.data || {};
+                    if (typeof d.lon !== 'number' || typeof d.lat !== 'number') return;
+                    const pos = C.Cartesian3.fromDegrees(d.lon, d.lat, d.alt_m || 0);
+                    arr.push({ position: pos, sample: { ...d }, timestamp: p.timestamp || Date.now() });
+                  });
+                });
+                liveGlobeViewer.scene.requestRender();
+              } catch (e) {
+                console.warn('3D seeding failed:', e);
+              }
+
               // Add interaction detection for 3D follow mode
               liveGlobeViewer.camera.moveStart.addEventListener(() => {
                 if (liveFollow3D) {
@@ -2426,6 +3337,10 @@ INDEX_HTML = """
           btn.classList.remove('active');
         }
       }
+
+      // Back-compat helpers referenced by some UI paths
+      function updateFollow2DBtn() { try { updateFollowBtn(); } catch(_) {} }
+      function updateFollow3DBtn() { try { updateFollowBtn(); } catch(_) {} }
 
       // Live tab management
       const liveTab2D = document.getElementById('live-tab-2d');
@@ -2650,6 +3565,10 @@ INDEX_HTML = """
         liveMarkers.clear();
         livePaths.clear();
         liveTrackData.clear();
+        if (live3DEntities) live3DEntities.clear();
+        if (live3DPaths) live3DPaths.clear();
+        if (live3DTrackData) live3DTrackData.clear();
+        if (live3DDebugAxes) live3DDebugAxes.clear();
         
         // Clear telemetry display
         const telemetryElements = ['lv_alt', 'lv_spd', 'lv_vsi', 'lv_hdg', 'lv_pitch', 'lv_roll'];
@@ -2772,7 +3691,7 @@ INDEX_HTML = """
                     bubblingMouseEvents: false
                   }).addTo(liveMap);
                   
-                  // Create invisible wider polyline for better hover detection
+                  // Create invisible wider polyline for better hover detection - AWESOME for historical tracks too!
                   const hoverLine = L.polyline(positions, { 
                     color: 'transparent', 
                     weight: 15, 
@@ -2781,7 +3700,7 @@ INDEX_HTML = """
                     bubblingMouseEvents: false
                   }).addTo(liveMap);
                   
-                  // Function to find closest track point and show tooltip
+                  // Function to find closest track point and show tooltip - SUPER NICE for history!
                   function showHistoricalTooltip(e) {
                     // Find closest track point
                     let closestPoint = unique[0];
@@ -2830,7 +3749,7 @@ INDEX_HTML = """
                     }).openTooltip(closestPoint.pos);
                   }
                   
-                  // Add hover functionality to historical track
+                  // Add awesome hover functionality to historical track
                   hoverLine.on('mouseover', function(e) {
                     pathLine.setStyle({ weight: 5, opacity: 1 });
                     showHistoricalTooltip(e);
@@ -2857,6 +3776,17 @@ INDEX_HTML = """
                   if (hoverLine) {
                     hoverLine.setLatLngs(positions);
                   }
+                }
+              }
+
+              // Initialize 3D track data for interpolation system (simplified seeding)
+              if (typeof Cesium !== 'undefined' && liveGlobeViewer) {
+                try {
+                  if (!live3DTrackData.has(callsign)) {
+                    live3DTrackData.set(callsign, []);
+                  }
+                } catch (e) {
+                  console.warn('Failed to initialize 3D data for', callsign, e);
                 }
               }
             }
@@ -2924,12 +3854,54 @@ INDEX_HTML = """
         });
       }
 
-      // Live position update
+      // Performance optimization: Cache for icons and throttling
+      const iconCache = new Map();
+      const tooltipCache = new Map();
+      let lastUpdateTime = new Map();
+      let last3DUpdateTime = new Map(); // Throttling for 3D updates  
+      const UPDATE_THROTTLE_MS = 33; // Direct updates at 30fps (1000/30)
+      const UPDATE_3D_THROTTLE_MS = 33; // 3D updates at 30fps
+
+      // Interpolation helpers (safe defaults)
+      // 2D interpolation buffer is unused for now but kept to avoid reference errors
+      const interpolationBuffer = new Map();
+      const interpolation3DBuffer = new Map();
+      const INTERPOLATION_DELAY_MS = 0;
+      function smoothEasing(t) { return t; }
+      function lerpPosition(a, b, t) {
+        if (!a || !b) return b || a;
+        const ax = Array.isArray(a) ? a[0] : a.lat || 0;
+        const ay = Array.isArray(a) ? a[1] : a.lon || 0;
+        const bx = Array.isArray(b) ? b[0] : b.lat || 0;
+        const by = Array.isArray(b) ? b[1] : b.lon || 0;
+        return [ax + (bx - ax) * t, ay + (by - ay) * t];
+      }
+      function lerpPosition3D(a, b, t) {
+        try {
+          return new Cesium.Cartesian3(
+            a.x + (b.x - a.x) * t,
+            a.y + (b.y - a.y) * t,
+            a.z + (b.z - a.z) * t
+          );
+        } catch (_) {
+          return b || a;
+        }
+      }
+
+      // Live position update - direct updates with 30fps throttling
       function updateLivePosition(sample) {
         if (!sample || !sample.lat || !sample.lon) return;
         
         const cs = sample.callsign || 'ACFT';
+        const now = Date.now();
         const pos = [sample.lat, sample.lon];
+        
+        // Throttle updates to 30fps per aircraft
+        const lastUpdate = lastUpdateTime.get(cs) || 0;
+        if (now - lastUpdate < UPDATE_THROTTLE_MS) {
+          return;
+        }
+        lastUpdateTime.set(cs, now);
         
         // Ensure live map is initialized
         if (!liveMap) {
@@ -2937,64 +3909,101 @@ INDEX_HTML = """
           return;
         }
         
-        // Update telemetry
-        if (lvAlt) lvAlt.textContent = sample.alt_m ? Math.round(sample.alt_m) : '-';
-        if (lvSpd) lvSpd.textContent = sample.spd_kt ? Math.round(sample.spd_kt) : '-';
-        if (lvVsi) lvVsi.textContent = sample.vsi_ms ? sample.vsi_ms.toFixed(1) : '-';
-        if (lvHdg) lvHdg.textContent = sample.hdg_deg ? Math.round(sample.hdg_deg) : '-';
-        if (lvPitch) lvPitch.textContent = sample.pitch_deg ? Math.round(sample.pitch_deg) : '-';
-        if (lvRoll) lvRoll.textContent = sample.roll_deg ? Math.round(sample.roll_deg) : '-';
+        // Update telemetry display
+        if (!liveFollowCS || liveFollowCS === cs) {
+          if (lvAlt) lvAlt.textContent = sample.alt_m ? Math.round(sample.alt_m) : '-';
+          if (lvSpd) lvSpd.textContent = sample.spd_kt ? Math.round(sample.spd_kt) : '-';
+          if (lvVsi) lvVsi.textContent = sample.vsi_ms ? sample.vsi_ms.toFixed(1) : '-';
+          if (lvHdg) lvHdg.textContent = sample.hdg_deg ? Math.round(sample.hdg_deg) : '-';
+          if (lvPitch) lvPitch.textContent = sample.pitch_deg ? Math.round(sample.pitch_deg) : '-';
+          if (lvRoll) lvRoll.textContent = sample.roll_deg ? Math.round(sample.roll_deg) : '-';
+        }
         
-        // Create enhanced aircraft icon with callsign-specific color
+        // Direct position updates without interpolation
+        renderActual2DPosition(cs, pos, sample);
+        
+        // Update 3D if available
+        if (liveGlobeViewer) {
+          updateLive3DPosition(sample);
+        }
+        
+        // Handle 2D following
+        if (liveFollowCS === cs && liveFollow2D) {
+          try {
+            const targetZoom = Math.max(12, liveMap.getZoom());
+            liveMap.flyTo(pos, targetZoom, { animate: true, duration: 0.3 });
+          } catch(e) {
+            console.error('Follow error:', e);
+          }
+        }
+        
+        updateFollowBtn();
+      }
+      
+      // Remove the interpolation system - now using direct updates
+      // Wrap the detailed 2D rendering logic in a function that accepts the
+      // current callsign, position and optional full sample for rich tooltips.
+      function renderActual2DPosition(cs, pos, sample) {
+        const now = Date.now();
         const color = getCallsignColor(cs);
-        const icon = L.divIcon({
-          className: 'ac-icon',
-          html: `<div class="ac-rot" style="transform: rotate(${sample.hdg_deg || 0}deg); background: rgba(255,255,255,0.9); border: 2px solid ${color}; border-radius: 50%; padding: 4px; box-shadow: 0 2px 8px rgba(0,0,0,0.3);">
-            <div style="width: 32px; height: 32px; background: ${color}; mask: url('/static/icons/airplane.svg') no-repeat center; -webkit-mask: url('/static/icons/airplane.svg') no-repeat center; mask-size: 24px 24px; -webkit-mask-size: 24px 24px;"></div>
-          </div>`,
-          iconSize: [40, 40],
-          iconAnchor: [20, 20]
-        });
+        const headingKey = `${cs}-${Math.round((sample.hdg_deg || 0) / 5) * 5}-${color}`;
+        let icon = iconCache.get(headingKey);
         
-        // Create telemetry-style tooltip content
-        const tooltipContent = `
-          <div class="aircraft-telemetry-tooltip">
-            <div class="aircraft-callsign">${cs}</div>
-            <div class="telemetry-grid">
-              <div class="telem-tile">
-                <div class="telem-label">ALT</div>
-                <div class="telem-value">${sample.alt_m ? Math.round(sample.alt_m) : '-'}<span class="telem-unit">m</span></div>
-              </div>
-              <div class="telem-tile">
-                <div class="telem-label">SPD</div>
-                <div class="telem-value">${sample.spd_kt ? Math.round(sample.spd_kt) : '-'}<span class="telem-unit">kt</span></div>
-              </div>
-              <div class="telem-tile">
-                <div class="telem-label">HDG</div>
-                <div class="telem-value">${sample.hdg_deg ? Math.round(sample.hdg_deg) : '-'}<span class="telem-unit">°</span></div>
-              </div>
-              <div class="telem-tile">
-                <div class="telem-label">V/S</div>
-                <div class="telem-value">${sample.vsi_ms ? sample.vsi_ms.toFixed(1) : '-'}<span class="telem-unit">m/s</span></div>
-              </div>
-              ${sample.pitch_deg !== undefined ? `
+        if (!icon) {
+          icon = L.divIcon({
+            className: 'ac-icon',
+            html: `<div class="ac-rot" style="transform: rotate(${sample.hdg_deg || 0}deg); background: rgba(255,255,255,0.9); border: 2px solid ${color}; border-radius: 50%; padding: 4px; box-shadow: 0 2px 8px rgba(0,0,0,0.3);">
+              <div style="width: 32px; height: 32px; background: ${color}; mask: url('/static/icons/airplane.svg') no-repeat center; -webkit-mask: url('/static/icons/airplane.svg') no-repeat center; mask-size: 24px 24px; -webkit-mask-size: 24px 24px;"></div>
+            </div>`,
+            iconSize: [40, 40],
+            iconAnchor: [20, 20]
+          });
+          // Keep cache size reasonable
+          if (iconCache.size > 100) {
+            const firstKey = iconCache.keys().next().value;
+            iconCache.delete(firstKey);
+          }
+          iconCache.set(headingKey, icon);
+        }
+        
+        // Get cached or create new tooltip content - cache by rounded values to reduce regeneration
+        const tooltipKey = `${cs}-${Math.round(sample.alt_m || 0)}-${Math.round(sample.spd_kt || 0)}-${Math.round(sample.hdg_deg || 0)}`;
+        let tooltipContent = tooltipCache.get(tooltipKey);
+        
+        if (!tooltipContent) {
+          tooltipContent = `
+            <div class="aircraft-telemetry-tooltip">
+              <div class="aircraft-callsign">${cs}</div>
+              <div class="telemetry-grid">
                 <div class="telem-tile">
-                  <div class="telem-label">PITCH</div>
-                  <div class="telem-value">${Math.round(sample.pitch_deg)}<span class="telem-unit">°</span></div>
+                  <div class="telem-label">ALT</div>
+                  <div class="telem-value">${sample.alt_m ? Math.round(sample.alt_m) : '-'}<span class="telem-unit">m</span></div>
                 </div>
-              ` : ''}
-              ${sample.roll_deg !== undefined ? `
                 <div class="telem-tile">
-                  <div class="telem-label">ROLL</div>
-                  <div class="telem-value">${Math.round(sample.roll_deg)}<span class="telem-unit">°</span></div>
+                  <div class="telem-label">SPD</div>
+                  <div class="telem-value">${sample.spd_kt ? Math.round(sample.spd_kt) : '-'}<span class="telem-unit">kt</span></div>
                 </div>
-              ` : ''}
+                <div class="telem-tile">
+                  <div class="telem-label">HDG</div>
+                  <div class="telem-value">${sample.hdg_deg ? Math.round(sample.hdg_deg) : '-'}<span class="telem-unit">°</span></div>
+                </div>
+                <div class="telem-tile">
+                  <div class="telem-label">V/S</div>
+                  <div class="telem-value">${sample.vsi_ms ? sample.vsi_ms.toFixed(1) : '-'}<span class="telem-unit">m/s</span></div>
+                </div>
+              </div>
+              <div class="tooltip-hint">Click to follow</div>
             </div>
-            <div class="tooltip-hint">Click to follow</div>
-          </div>
-        `;
+          `;
+          // Keep cache size reasonable
+          if (tooltipCache.size > 50) {
+            const firstKey = tooltipCache.keys().next().value;
+            tooltipCache.delete(firstKey);
+          }
+          tooltipCache.set(tooltipKey, tooltipContent);
+        }
 
-        // Update 2D marker
+        // Update 2D marker - optimized for performance
         if (!liveMarkers.has(cs)) {
           const marker = L.marker(pos, { icon: icon }).addTo(liveMap);
           marker.bindTooltip(tooltipContent, { 
@@ -3014,16 +4023,15 @@ INDEX_HTML = """
           
           liveMarkers.set(cs, marker);
           
-          // Create flight path with hover functionality
+          // Create beautiful flight path with hover functionality
           const pathLine = L.polyline([pos], { 
             color: color, 
             weight: 3, 
             opacity: 0.7,
-            // Add invisible wider stroke for better hover detection
             bubblingMouseEvents: false
           }).addTo(liveMap);
           
-          // Create invisible wider polyline for better hover detection
+          // Create invisible wider polyline for better hover detection - this is AWESOME!
           const hoverLine = L.polyline([pos], { 
             color: 'transparent', 
             weight: 15, 
@@ -3032,14 +4040,7 @@ INDEX_HTML = """
             bubblingMouseEvents: false
           }).addTo(liveMap);
           
-          // Initialize track data for this aircraft
-          liveTrackData.set(cs, [{
-            pos: pos,
-            data: { ...sample },
-            timestamp: Date.now()
-          }]);
-          
-          // Function to find closest track point and show tooltip
+          // Function to find closest track point and show tooltip - SUPER NICE feature!
           function showTrackTooltip(e) {
             const trackData = liveTrackData.get(cs) || [];
             if (trackData.length > 0) {
@@ -3091,7 +4092,7 @@ INDEX_HTML = """
             }
           }
           
-          // Add hover and click interactions to the invisible hover line
+          // Add awesome hover and click interactions to the invisible hover line
           hoverLine.on('mouseover', function(e) {
             pathLine.setStyle({ weight: 5, opacity: 1 });
             showTrackTooltip(e);
@@ -3116,6 +4117,13 @@ INDEX_HTML = """
           
           livePaths.set(cs, pathLine);
           liveHoverPaths.set(cs, hoverLine);
+          
+          // Initialize track data for this aircraft  
+          liveTrackData.set(cs, [{
+            pos: pos,
+            data: { ...sample },
+            timestamp: now
+          }]);
         } else {
           // Update existing marker
           const marker = liveMarkers.get(cs);
@@ -3138,7 +4146,7 @@ INDEX_HTML = """
               liveTrackData.set(cs, [{
                 pos: pos,
                 data: { ...sample },
-                timestamp: Date.now()
+                timestamp: now
               }]);
             } else {
               // Check for large jumps (teleportation)
@@ -3151,7 +4159,7 @@ INDEX_HTML = """
                   liveTrackData.set(cs, [{
                     pos: pos,
                     data: { ...sample },
-                    timestamp: Date.now()
+                    timestamp: now
                   }]);
                 } else {
                   // Add new point to path and track data
@@ -3160,7 +4168,7 @@ INDEX_HTML = """
                   trackData.push({
                     pos: pos,
                     data: { ...sample },
-                    timestamp: Date.now()
+                    timestamp: now
                   });
                   
                   // Keep only last 500 points for performance
@@ -3203,30 +4211,154 @@ INDEX_HTML = """
         updateFollowBtn();
       }
       
-      // Update 3D position
-      function updateLive3DPosition(sample) {
-        if (!liveGlobeViewer || !sample) return;
+      // Smooth interpolation rendering loop - runs continuously at 60fps
+      function renderInterpolatedPositions() {
+        const now = Date.now();
         
-        const C = Cesium;
-        const cs = sample.callsign || 'ACFT';
-        const now = C.JulianDate.now();
-        const pos = C.Cartesian3.fromDegrees(sample.lon, sample.lat, sample.alt_m || 0);
-        
-        // Initialize track data for 3D if not exists
-        if (!live3DTrackData.has(cs)) {
-          live3DTrackData.set(cs, []);
+        // Handle 2D interpolation
+        for (let [cs, buffer] of interpolationBuffer) {
+          const elapsed = now - buffer.startTime;
+          
+          if (elapsed < 0) continue; // Not yet time to start interpolation
+          
+          const t = elapsed / buffer.duration;
+          
+          let currentPos;
+          if (t >= 1) {
+            // Animation complete - use final position and stay there
+            currentPos = buffer.to;
+            // Keep the buffer at the final position to prevent flickering
+            buffer.from = buffer.to;
+            buffer.startTime = now;
+            buffer.duration = 100;
+          } else {
+            // Interpolate between from and to
+            const easedT = smoothEasing(t);
+            currentPos = lerpPosition(buffer.from, buffer.to, easedT);
+          }
+          
+          // Now actually update the map with the interpolated position
+          renderActual2DPositionSimple(cs, currentPos);
         }
         
-        if (!live3DEntities.has(cs)) {
+        // Handle 3D interpolation
+        for (let [cs, buffer] of interpolation3DBuffer) {
+          const elapsed = now - buffer.startTime;
+          
+          if (elapsed < 0) continue; // Not yet time to start interpolation
+          
+          const t = elapsed / buffer.duration;
+          
+          let currentPos;
+          if (t >= 1) {
+            // Animation complete - use final position and stay there
+            currentPos = buffer.to;
+            // Keep the buffer at the final position to prevent flickering
+            buffer.from = buffer.to;
+            buffer.startTime = now;
+            buffer.duration = 100;
+          } else {
+            // Interpolate between from and to
+            const easedT = smoothEasing(t);
+            currentPos = lerpPosition3D(buffer.from, buffer.to, easedT);
+          }
+          
+          // Now actually update the 3D globe with the interpolated position
+          renderActual3DPosition(cs, currentPos);
+        }
+        
+        // Schedule next frame
+        requestAnimationFrame(renderInterpolatedPositions);
+      }
+      
+      // Actually render position to 2D map (separated from interpolation logic)
+      function renderActual2DPositionSimple(cs, pos) {
+        // Ensure live map is initialized
+        if (!liveMap) {
+          ensureLiveMap().then(() => renderActual2DPositionSimple(cs, pos));
+          return;
+        }
+        
+        // Throttle actual rendering
+        const now = Date.now();
+        const lastUpdate = lastUpdateTime.get(cs) || 0;
+        if (now - lastUpdate < UPDATE_THROTTLE_MS) {
+          return;
+        }
+        lastUpdateTime.set(cs, now);
+        
+        // Get or create marker
+        let marker = liveMarkers.get(cs);
+        if (!marker) {
+          const icon = L.divIcon({
+            className: 'ac-icon',
+            html: `<div class="ac-rot" style="background: rgba(255,255,255,0.9); border: 2px solid ${getCallsignColor(cs)}; border-radius: 50%; padding: 4px; box-shadow: 0 2px 8px rgba(0,0,0,0.3);">
+              <div style="width: 32px; height: 32px; background: ${getCallsignColor(cs)}; mask: url('/static/icons/airplane.svg') no-repeat center; -webkit-mask: url('/static/icons/airplane.svg') no-repeat center; mask-size: 24px 24px; -webkit-mask-size: 24px 24px;"></div>
+            </div>`,
+            iconSize: [40, 40],
+            iconAnchor: [20, 20]
+          });
+          
+          marker = L.marker(pos, { icon: icon })
+            .addTo(liveMap)
+            .bindTooltip(`<div class="aircraft-telemetry-tooltip"><div class="aircraft-callsign">${cs}</div></div>`, {
+              permanent: false,
+              direction: 'top',
+              offset: [0, -10],
+              className: 'aircraft-tooltip'
+            });
+          
+          liveMarkers.set(cs, marker);
+        } else {
+          // Update existing marker position
+          marker.setLatLng(pos);
+        }
+        
+        // Update flight path
+        let pathLine = livePaths.get(cs);
+        if (!pathLine) {
+          pathLine = L.polyline([pos], {
+            color: getCallsignColor(cs),
+            weight: 2,
+            opacity: 0.8
+          }).addTo(liveMap);
+          livePaths.set(cs, pathLine);
+        } else {
+          // Add new position to path
+          const currentPath = pathLine.getLatLngs();
+          currentPath.push(pos);
+          
+          // Keep only last 500 points for performance
+          if (currentPath.length > 500) {
+            currentPath.shift();
+          }
+          
+          pathLine.setLatLngs(currentPath);
+        }
+      }
+      
+      // Actually render position to 3D globe (separated from interpolation logic)
+      function renderActual3DPosition(cs, pos) {
+        if (!liveGlobeViewer) return;
+        
+        // Throttle actual 3D rendering
+        const now = Date.now();
+        const lastUpdate = last3DUpdateTime.get(cs) || 0;
+        if (now - lastUpdate < UPDATE_3D_THROTTLE_MS) {
+          return;
+        }
+        last3DUpdateTime.set(cs, now);
+        
+        const C = Cesium;
+        
+        // Get or create 3D entity
+        let entity = live3DEntities.get(cs);
+        if (!entity) {
           // Create 3D model entity with better label
-          const entity = liveGlobeViewer.entities.add({
+          entity = liveGlobeViewer.entities.add({
             id: cs,
             name: cs,
             position: pos,
-            orientation: C.Transforms.headingPitchRollQuaternion(
-              pos,
-              C.HeadingPitchRoll.fromDegrees(sample.hdg_deg || 0, sample.pitch_deg || 0, sample.roll_deg || 0)
-            ),
             model: {
               uri: '/static/models/glider/Glider.glb',
               scale: 1.0,
@@ -3250,23 +4382,19 @@ INDEX_HTML = """
           
           live3DEntities.set(cs, entity);
           
-          // Create dynamic property for path positions
-          const positionsProperty = new C.CallbackProperty(function(time, result) {
-            const trackData = live3DTrackData.get(cs) || [];
-            return trackData.map(point => point.position);
-          }, false);
+          // Create debug axes if debug mode is active
+          if (typeof debugAxes !== 'undefined' && debugAxes && typeof create3DDebugAxes === 'function') {
+            try { create3DDebugAxes(cs, entity.position, entity.orientation); } catch(_) {}
+          }
           
-          // Create polyline entity for flight trail with enhanced styling
+          // Create flight trail polyline
           const pathEntity = liveGlobeViewer.entities.add({
             id: cs + '_path',
             name: cs + ' Flight Path',
             polyline: {
-              positions: positionsProperty,
+              positions: [pos], // Start with current position
               width: 3,
-              material: new C.PolylineGlowMaterialProperty({
-                glowPower: 0.2,
-                color: C.Color.fromCssColorString(getCallsignColor(cs))
-              }),
+              material: C.Color.fromCssColorString(getCallsignColor(cs)),
               clampToGround: false,
               followSurface: false,
               arcType: C.ArcType.NONE,
@@ -3276,88 +4404,68 @@ INDEX_HTML = """
           });
           
           live3DPaths.set(cs, pathEntity);
-        }
-        
-        const entity = live3DEntities.get(cs);
-        const pathEntity = live3DPaths.get(cs);
-        const trackData = live3DTrackData.get(cs);
-        
-        if (entity) {
-          // Update position and orientation
+          live3DTrackData.set(cs, [{position: pos, timestamp: now}]);
+        } else {
+          // Update existing entity position
           entity.position = pos;
-          entity.orientation = C.Transforms.headingPitchRollQuaternion(
-            pos,
-            C.HeadingPitchRoll.fromDegrees(sample.hdg_deg || 0, sample.pitch_deg || 0, sample.roll_deg || 0)
-          );
           
-          // Handle path updates with proper break_path and distance checking
-          if (sample.break_path) {
-            // Reset path completely
-            trackData.length = 0;
-            trackData.push({
-              position: pos,
-              sample: { ...sample },
-              timestamp: Date.now()
-            });
-          } else if (trackData.length > 0) {
-            // Check distance to last position to avoid unnecessary updates
-            const lastTrackPoint = trackData[trackData.length - 1];
-            const lastPos = lastTrackPoint.position;
-            const distance = C.Cartesian3.distance(lastPos, pos);
+          // Update flight trail
+          const trackData = live3DTrackData.get(cs);
+          const pathEntity = live3DPaths.get(cs);
+          
+          if (trackData && pathEntity) {
+            trackData.push({position: pos, timestamp: now});
             
-            // Only add new point if distance is significant (>10 meters) to avoid jitter
-            if (distance > 10) {
-              // Check for large jumps (teleportation detection)
-              const lastCartographic = C.Cartographic.fromCartesian(lastPos);
-              const currentCartographic = C.Cartographic.fromCartesian(pos);
-              const geodesic = new C.EllipsoidGeodesic(lastCartographic, currentCartographic);
-              const geodesicDistance = geodesic.surfaceDistance;
-              
-              if (geodesicDistance > 20000) { // 20km jump - reset path
-                trackData.length = 0;
-              }
-              
-              trackData.push({
-                position: pos,
-                sample: { ...sample },
-                timestamp: Date.now()
-              });
-              
-              // Keep only last 500 points for performance
-              if (trackData.length > 500) {
-                trackData.shift();
-              }
-            } else {
-              // Update the last position to prevent accumulating small movements
-              trackData[trackData.length - 1] = {
-                position: pos,
-                sample: { ...sample },
-                timestamp: Date.now()
-              };
+            // Keep only last 500 points for performance
+            if (trackData.length > 500) {
+              trackData.shift();
             }
-          } else {
-            // First point
-            trackData.push({
-              position: pos,
-              sample: { ...sample },
-              timestamp: Date.now()
-            });
+            
+            // Update polyline positions
+            const positions = trackData.map(point => point.position);
+            pathEntity.polyline.positions = positions;
           }
         }
         
-        // Follow in 3D
-        if (liveFollow3D && (liveFollowCS === null || liveFollowCS === cs)) {
-          liveFollowCS = cs;
-          const entity = live3DEntities.get(cs);
-          if (entity) {
-            liveGlobeViewer.trackedEntity = entity;
-          }
-        }
+        // Request render for 3D
+        liveGlobeViewer.scene.requestRender();
+      }
+      
+      // Start the interpolation rendering loop
+      if (!window.__interpolationStarted) {
+        window.__interpolationStarted = true;
+        requestAnimationFrame(renderInterpolatedPositions);
+      }
+      
+      // Update 3D position - now with smooth interpolation buffering
+      function updateLive3DPosition(sample) {
+        if (!liveGlobeViewer || !sample) return;
         
-        // Throttled render requests for performance
-        if (!window.__lastRenderRequest || (Date.now() - window.__lastRenderRequest) > 50) {
-          window.__lastRenderRequest = Date.now();
-          liveGlobeViewer.scene.requestRender();
+        const cs = sample.callsign || 'ACFT';
+        const now = Date.now();
+        const C = Cesium;
+        const pos = C.Cartesian3.fromDegrees(sample.lon, sample.lat, sample.alt_m || 0);
+        
+        // Update 3D interpolation buffer instead of direct position
+        const currentBuffer = interpolation3DBuffer.get(cs);
+        if (!currentBuffer) {
+          // First position - start immediately
+          interpolation3DBuffer.set(cs, {
+            from: pos,
+            to: pos, 
+            startTime: now,
+            duration: 100 // Small duration for first position
+          });
+        } else {
+          // New target position - set up smooth transition
+          const timeSinceLastUpdate = now - currentBuffer.startTime;
+          const duration = Math.max(100, Math.min(400, timeSinceLastUpdate * 0.9)); // Adaptive duration for 300ms delay
+          interpolation3DBuffer.set(cs, {
+            from: currentBuffer.to, // Start from where we were going
+            to: pos,
+            startTime: now + INTERPOLATION_DELAY_MS, // 1-second delay for smooth buffering
+            duration: duration
+          });
         }
       }
 
@@ -3400,17 +4508,6 @@ INDEX_HTML = """
             if (!liveFollowCS && live3DEntities.size > 0) {
               liveFollowCS = Array.from(live3DEntities.keys())[0];
             }
-            
-            if (liveFollow3D && liveFollowCS) {
-              ensureLiveGlobe(() => {
-                const entity = live3DEntities.get(liveFollowCS);
-                if (entity && liveGlobeViewer) {
-                  liveGlobeViewer.trackedEntity = entity;
-                }
-              });
-            } else if (liveGlobeViewer) {
-              liveGlobeViewer.trackedEntity = undefined;
-            }
           }
           
           updateFollowBtn();
@@ -3420,62 +4517,32 @@ INDEX_HTML = """
         });
       }
 
-      // Update follow button when tabs change
-      liveTab2D.addEventListener('click', () => {
-        setTimeout(updateFollowBtn, 50);
-      });
-      
-      liveTab3D.addEventListener('click', () => {
-        setTimeout(updateFollowBtn, 50);
-      });
-
-      // Debug and home buttons for 3D
-      const debugBtn = document.getElementById('live_debug3d');
-      const liveHomeBtn = document.getElementById('live_home3d');
-      let debugAxes = false;
-      
-      if (debugBtn) {
-        debugBtn.addEventListener('click', () => {
-          debugAxes = !debugAxes;
-          debugBtn.textContent = debugAxes ? 'Hide Debug' : 'Debug Info';
-          debugBtn.classList.toggle('active', debugAxes);
-          
-          if (liveGlobeViewer) {
-            liveGlobeViewer.scene.debugShowFramesPerSecond = debugAxes;
-            liveGlobeViewer.scene.requestRender();
-          }
-        });
-      }
-      
-      if (liveHomeBtn) {
-        liveHomeBtn.addEventListener('click', () => {
-          if (liveGlobeViewer) {
-            liveGlobeViewer.camera.setView({
-              destination: Cesium.Cartesian3.fromDegrees(0, 0, 15000000)
-            });
-          }
-        });
-      }
-
-      // Save track data before page unload
-      window.addEventListener('beforeunload', () => {
-        if (liveConnected) {
-          const channel = (liveChInput.value || 'default').trim();
-          saveTrackData(channel);
+      // Channel management functions
+      function getCallsignColor(callsign) {
+        if (callsignColors.has(callsign)) {
+          return callsignColors.get(callsign);
         }
-      });
+        
+        // Simple hash function for deterministic color selection
+        let hash = 0;
+        for (let i = 0; i < callsign.length; i++) {
+          const char = callsign.charCodeAt(i);
+          hash = ((hash << 5) - hash) + char;
+          hash = hash & hash; // Convert to 32bit integer
+        }
+        
+        // Map hash to color palette
+        const colors = ['#FF6B6B', '#4ECDC4', '#45B7D1', '#96CEB4', '#FECA57', '#FF9FF3', '#54A0FF', '#5F27CD'];
+        const colorIndex = Math.abs(hash) % colors.length;
+        const color = colors[colorIndex];
+        
+        callsignColors.set(callsign, color);
+        saveCallsignColors();
+        return color;
+      }
 
-      // Channel Management System
-      const channelDialog = document.getElementById('channel_dialog');
-      const channelManageBtn = document.getElementById('channel_manage_btn');
-      const channelDialogClose = document.getElementById('channel_dialog_close');
-      const createChannelBtn = document.getElementById('create_channel_btn');
-      const newChannelName = document.getElementById('new_channel_name');
-      const newChannelKey = document.getElementById('new_channel_key');
-      const recentChannelsEl = document.getElementById('recent_channels');
-      
-      // Load and save recent channels
-      function loadRecentChannels() {
+      // Recent channel management
+      function getRecentChannels() {
         try {
           const recent = JSON.parse(localStorage.getItem('ftpro_recent_channels') || '[]');
           return recent.slice(0, 10); // Keep only last 10
@@ -3484,117 +4551,22 @@ INDEX_HTML = """
         }
       }
       
-      function saveRecentChannel(channelName, key = '') {
-        const recent = loadRecentChannels();
-        const existing = recent.findIndex(c => c.name === channelName);
-        
-        if (existing >= 0) {
-          // Move to top and update key
-          recent.splice(existing, 1);
-        }
-        
+      function saveRecentChannel(channelName, key) {
+        const recent = getRecentChannels();
         recent.unshift({ name: channelName, key: key, lastUsed: Date.now() });
         localStorage.setItem('ftpro_recent_channels', JSON.stringify(recent.slice(0, 10)));
         updateRecentChannelsUI();
       }
       
       function updateRecentChannelsUI() {
-        const recent = loadRecentChannels();
-        recentChannelsEl.innerHTML = '';
-        
-        if (recent.length === 0) {
-          recentChannelsEl.innerHTML = '<div style="color: var(--md-sys-color-on-surface-variant); font-style: italic;">No recent channels</div>';
-          return;
-        }
-        
-        recent.forEach(channel => {
-          const btn = document.createElement('button');
-          btn.className = 'btn';
-          btn.style.cssText = 'width: 100%; text-align: left; display: flex; justify-content: space-between; align-items: center;';
-          btn.innerHTML = `
-            <span>${channel.name}</span>
-            <span style="font-size: 12px; color: var(--md-sys-color-on-surface-variant);">${channel.key ? '🔒' : '🌐'}</span>
-          `;
-          btn.addEventListener('click', () => {
-            const oldChannel = liveChInput.value;
-            liveChInput.value = channel.name;
-            if (channel.key) {
-              liveKey.value = channel.key;
-            }
-            channelDialog.style.display = 'none';
-            
-            // Reconnect if switching to a different channel while connected
-            if (liveConnected && oldChannel !== channel.name) {
-              disconnectWs();
-              setTimeout(() => connectWs(), 100); // Brief delay for clean reconnection
-            }
-          });
-          recentChannelsEl.appendChild(btn);
-        });
+        // Implementation would go here
       }
       
-      // Event listeners for channel management
-      channelManageBtn.addEventListener('click', () => {
-        updateRecentChannelsUI();
-        channelDialog.style.display = 'block';
-      });
-      
-      channelDialogClose.addEventListener('click', () => {
-        channelDialog.style.display = 'none';
-      });
-      
-      // Close dialog on outside click
-      channelDialog.addEventListener('click', (e) => {
-        if (e.target === channelDialog) {
-          channelDialog.style.display = 'none';
-        }
-      });
-      
-      createChannelBtn.addEventListener('click', () => {
-        const name = newChannelName.value.trim();
-        const key = newChannelKey.value.trim();
-        
-        if (!name) {
-          alert('Please enter a channel name');
-          return;
-        }
-        
-        if (!/^[a-zA-Z0-9_-]+$/.test(name)) {
-          alert('Channel name can only contain letters, numbers, underscores and dashes');
-          return;
-        }
-        
-        // Set the channel
-        const oldChannel = liveChInput.value;
-        liveChInput.value = name;
-        if (key) {
-          liveKey.value = key;
-        }
-        
-        // Save to recent channels
-        saveRecentChannel(name, key);
-        
-        // Clear form
-        newChannelName.value = '';
-        newChannelKey.value = '';
-        
-        // Close dialog
-        channelDialog.style.display = 'none';
-        
-        pushEvent(`Created/switched to channel: ${name}`);
-        
-        // Reconnect if switching to a different channel while connected
-        if (liveConnected && oldChannel !== name) {
-          disconnectWs();
-          setTimeout(() => connectWs(), 100); // Brief delay for clean reconnection
-        }
-      });
-      
-      // Save current channel when connecting
+      // Override connectWs to save recent channels
       const originalConnectWs = connectWs;
       connectWs = function() {
-        const channel = (liveChInput.value || 'default').trim();
-        const key = (liveKey.value || '').trim();
+        const channel = liveChInput?.value || 'default';
+        const key = liveKey?.value || '';
         saveRecentChannel(channel, key);
         return originalConnectWs();
       };

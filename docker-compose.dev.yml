@@ -1,6 +1,23 @@
 version: "3.8"
 
 services:
+  db:
+    image: postgres:15
+    container_name: flighttracepro-db-dev
+    restart: unless-stopped
+    environment:
+      - POSTGRES_DB=ftpro
+      - POSTGRES_USER=ftpro
+      - POSTGRES_PASSWORD=ftpro
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ftpro -d ftpro"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    volumes:
+      - ./postgres-data-dev:/var/lib/postgresql/data
   flighttracepro:
     build:
       context: .
@@ -11,6 +28,7 @@ services:
     environment:
       - LIVE_POST_KEY=${LIVE_POST_KEY:-}
       - CESIUM_ION_TOKEN=${CESIUM_ION_TOKEN:-}
+      - DATABASE_URL=${DATABASE_URL:-postgresql+asyncpg://ftpro:ftpro@db:5432/ftpro}
     # Hot-reload and live-edit server/static during development
     # Appends to Dockerfile ENTRYPOINT (uvicorn app:app ...)
     command: ["--host", "0.0.0.0", "--port", "8000", "--reload", "--reload-dir", "/app", "--reload-dir", "/app/static", "--reload-delay", "0.25"]
@@ -18,5 +36,8 @@ services:
       - ./server/app.py:/app/app.py:rw
       - ./server/gpx_to_kml.py:/app/gpx_to_kml.py:rw
       - ./static:/app/static:ro
+    depends_on:
+      db:
+        condition: service_healthy
     env_file:
       - .env

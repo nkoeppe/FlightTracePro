@@ -1,4 +1,22 @@
 services:
+  db:
+    image: postgres:15
+    container_name: flighttracepro-db
+    restart: unless-stopped
+    environment:
+      - POSTGRES_DB=ftpro
+      - POSTGRES_USER=ftpro
+      - POSTGRES_PASSWORD=ftpro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ftpro -d ftpro"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    volumes:
+      - ./postgres-data:/var/lib/postgresql/data
+    networks:
+      - proxy
+
   flighttracepro:
     build:
       context: .
@@ -11,10 +29,14 @@ services:
       - CESIUM_ION_TOKEN=${CESIUM_ION_TOKEN:-}
       - CESIUM_ION_TOKEN_FILE=/run/secrets/cesium_ion_token
       - LIVE_POST_KEY=${LIVE_POST_KEY:-}
+      - DATABASE_URL=${DATABASE_URL:-postgresql+asyncpg://ftpro:ftpro@db:5432/ftpro}
     secrets:
       - cesium_ion_token
     networks:
       - proxy
+    depends_on:
+      db:
+        condition: service_healthy
 
 networks:
   proxy:

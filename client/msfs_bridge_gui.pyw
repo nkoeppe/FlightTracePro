@@ -356,7 +356,7 @@ class MainWindow(QMainWindow):
     
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("FlightTracePro Bridge")
+        self.setWindowTitle("FlightTracePro - Bridge")
         self.setMinimumWidth(520)
         self.worker: Optional[BridgeWorker] = None
         self.log_entries = []  # Store all log entries with their levels
@@ -380,7 +380,7 @@ class MainWindow(QMainWindow):
         self.mode = QComboBox(); self.mode.addItems(["ws", "http"]); lay.addWidget(self.mode, row, 3); row += 1
 
         lay.addWidget(QLabel("Rate (Hz)"), row, 0)
-        self.rate = QSpinBox(); self.rate.setRange(1, 30); self.rate.setValue(2); lay.addWidget(self.rate, row, 1)
+        self.rate = QSpinBox(); self.rate.setRange(1, 30); self.rate.setValue(10); lay.addWidget(self.rate, row, 1)
         self.status = QLabel("disconnected"); self.status.setAlignment(Qt.AlignRight | Qt.AlignVCenter); lay.addWidget(self.status, row, 2, 1, 2); row += 1
 
         btns = QHBoxLayout()
