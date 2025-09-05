@@ -13,8 +13,9 @@ from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QGridLayout, QLabel, QLineEdit,
     QPushButton, QComboBox, QSpinBox, QHBoxLayout, QVBoxLayout, QSystemTrayIcon,
     QMenu, QMessageBox, QStyle, QTextEdit, QDialog, QCheckBox, QDialogButtonBox,
-    QFrame
+    QFrame, QProgressBar
 )
+from PySide6.QtNetwork import QLocalServer, QLocalSocket
 
 
 def meters_from_feet(ft: Optional[float]) -> Optional[float]:
@@ -1209,10 +1210,34 @@ if "%DEFERRED_MODE%"=="true" (
     timeout /t 2 /nobreak >nul
 )
 
-REM Self-delete (but keep log file for debugging)
-echo [%date% %time%] Self-deleting batch file... >> %LOGFILE%
-REM Delete asynchronously to avoid "batch file cannot be found" console noise
-start "" /b cmd /c del /f /q "%~f0" >nul 2>&1
+REM For instant updates, give user option to keep window open to review results
+if "%DEFERRED_MODE%"=="false" (
+    echo.
+    echo ========================================
+    echo Update completed! Press any key to keep this window open,
+    echo or it will auto-close in 5 seconds...
+    echo ========================================
+    timeout /t 5 /nobreak >nul
+    if !errorlevel! equ 0 (
+        echo Auto-closing...
+        REM Self-delete and exit immediately - use exit 0 to close the entire command window
+        echo [%date% %time%] Self-deleting batch file and closing window... >> %LOGFILE%
+        start "" /b cmd /c "timeout /t 1 /nobreak >nul & del /f /q "%~f0" >nul 2>&1"
+        exit 0
+    ) else (
+        echo Press any key to close...
+        pause >nul
+        REM Self-delete and exit after user presses key - use exit 0 to close the entire command window
+        echo [%date% %time%] Self-deleting batch file and closing window... >> %LOGFILE%
+        start "" /b cmd /c "timeout /t 1 /nobreak >nul & del /f /q "%~f0" >nul 2>&1"
+        exit 0
+    )
+) else (
+    REM Deferred mode - silent cleanup and exit - use exit /b to preserve silent behavior
+    echo [%date% %time%] Self-deleting batch file... >> %LOGFILE%
+    start "" /b cmd /c "timeout /t 1 /nobreak >nul & del /f /q "%~f0" >nul 2>&1"
+    exit /b 0
+)
 """)
             
             self.append_log(f"[update] Created batch file: {bat}")
@@ -1411,38 +1436,53 @@ start "" /b cmd /c del /f /q "%~f0" >nul 2>&1
                     # Auto-apply deferred update on startup
                     self.append_log("[update] Auto-applying deferred update...")
                     
-                    # Execute the batch file and exit immediately
-                    try:
-                        import subprocess
-                        self.append_log(f"[update] Executing batch file: {batch_file}")
-                        
-                        # Debug: Check batch file properties
+                    # Show progress dialog
+                    self.append_log("[update] Showing progress dialog...")
+                    progress_dialog = DeferredUpdateProgressDialog(version)
+                    progress_dialog.show()
+                    progress_dialog.start_animation()
+                    
+                    # Process events to show the dialog
+                    from PySide6.QtWidgets import QApplication
+                    QApplication.processEvents()
+                    
+                    # Give user a moment to see the dialog, then execute
+                    from PySide6.QtCore import QTimer
+                    
+                    def execute_update_delayed():
+                        """Execute the update after showing progress dialog"""
+                        # Execute the batch file and exit immediately
                         try:
-                            batch_size = os.path.getsize(batch_file)
-                            self.append_log(f"[update] Batch file size: {batch_size} bytes")
+                            import subprocess
+                            self.append_log(f"[update] Executing batch file: {batch_file}")
                             
-                            # Check if we can read the batch file
-                            with open(batch_file, 'r', encoding='cp1252') as bf:
-                                first_line = bf.readline().strip()
-                            self.append_log(f"[update] Batch first line: {repr(first_line)}")
-                        except Exception as debug_e:
-                            self.append_log(f"[update] Batch file debug failed: {debug_e}")
-                        
-                        # Try different execution methods for Windows compatibility
-                        launched = False
-                        
-                        # Method 1: Direct batch execution with shell=True
-                        try:
-                            proc = subprocess.Popen(
-                                batch_file,
-                                shell=True,
-                                cwd=os.path.dirname(batch_file),
-                                creationflags=subprocess.CREATE_NEW_CONSOLE if hasattr(subprocess, 'CREATE_NEW_CONSOLE') else 0
-                            )
-                            self.append_log(f"[update] Method 1 success - PID: {proc.pid}")
-                            launched = True
-                        except Exception as e1:
-                            self.append_log(f"[update] Method 1 failed: {e1}")
+                            # Debug: Check batch file properties
+                            try:
+                                batch_size = os.path.getsize(batch_file)
+                                self.append_log(f"[update] Batch file size: {batch_size} bytes")
+                                
+                                # Check if we can read the batch file
+                                with open(batch_file, 'r', encoding='cp1252') as bf:
+                                    first_line = bf.readline().strip()
+                                self.append_log(f"[update] Batch first line: {repr(first_line)}")
+                            except Exception as debug_e:
+                                self.append_log(f"[update] Batch file debug failed: {debug_e}")
+                            
+                            # Try different execution methods for Windows compatibility
+                            launched = False
+                            
+                            # Method 1: Direct batch execution with shell=True
+                            try:
+                                proc = subprocess.Popen(
+                                    batch_file,
+                                    shell=True,
+                                    cwd=os.path.dirname(batch_file),
+                                    creationflags=subprocess.CREATE_NEW_CONSOLE if hasattr(subprocess, 'CREATE_NEW_CONSOLE') else 0
+                                )
+                                self.append_log(f"[update] Method 1 success - PID: {proc.pid}")
+                                launched = True
+                            except Exception as e1:
+                                self.append_log(f"[update] Method 1 failed: {e1}")
                             
                             # Method 2: cmd.exe with proper quoting
                             try:
@@ -1463,33 +1503,38 @@ start "" /b cmd /c del /f /q "%~f0" >nul 2>&1
                                     launched = True
                                 except Exception as e3:
                                     self.append_log(f"[update] Method 3 failed: {e3}")
-                        
-                        if launched:
-                            # Remove marker file
-                            os.remove(marker_file)
-                            self.append_log("[update] Auto-applying deferred update - application will restart...")
-                            # Exit application
-                            import time
-                            time.sleep(1)
-                            os._exit(0)
-                        else:
-                            raise Exception("All execution methods failed")
-                    except ImportError:
-                        self.append_log(f"[update] subprocess not available, using fallback...")
-                        try:
-                            os.startfile(batch_file)
-                            os.remove(marker_file) 
-                            import time
-                            time.sleep(1)
-                            os._exit(0)
-                        except Exception as fallback_e:
-                            self.append_log(f"[update] Fallback failed: {fallback_e}")
-                    except Exception as e:
-                        self.append_log(f"[update] Failed to execute deferred update: {e}")
-                        # If auto-execution fails, show the dialog as fallback
-                        self.append_log("[update] Auto-execution failed, showing restart dialog...")
-                        dialog = DeferredUpdateRestartDialog(version, batch_file, self)
-                        dialog.exec()
+                            
+                            if launched:
+                                # Remove marker file
+                                os.remove(marker_file)
+                                self.append_log("[update] Auto-applying deferred update - application will restart...")
+                                # Exit application
+                                import time
+                                time.sleep(1)
+                                os._exit(0)
+                            else:
+                                raise Exception("All execution methods failed")
+                        except ImportError:
+                            self.append_log(f"[update] subprocess not available, using fallback...")
+                            try:
+                                os.startfile(batch_file)
+                                os.remove(marker_file) 
+                                import time
+                                time.sleep(1)
+                                os._exit(0)
+                            except Exception as fallback_e:
+                                self.append_log(f"[update] Fallback failed: {fallback_e}")
+                        except Exception as e:
+                            self.append_log(f"[update] Failed to execute deferred update: {e}")
+                            # If auto-execution fails, show the dialog as fallback
+                            self.append_log("[update] Auto-execution failed, showing restart dialog...")
+                            progress_dialog.stop_animation()
+                            progress_dialog.close()
+                            dialog = DeferredUpdateRestartDialog(version, batch_file, self)
+                            dialog.exec()
+                    
+                    # Start the delayed execution using QTimer (2 seconds to show progress)
+                    QTimer.singleShot(2000, execute_update_delayed)
                 else:
                     if batch_file and not os.path.exists(batch_file):
                         self.append_log(f"[update] Deferred update batch file missing: {batch_file}")
@@ -2072,6 +2117,141 @@ class DeferredUpdateRestartDialog(QDialog):
         return self.result_action
 
 
+class DeferredUpdateProgressDialog(QDialog):
+    """Steam-like progress dialog for deferred updates"""
+    
+    def __init__(self, version=""):
+        super().__init__()
+        self.version = version
+        self.init_ui()
+        self.setup_animation()
+        
+    def init_ui(self):
+        self.setWindowTitle("FlightTracePro")
+        self.setFixedSize(400, 200)
+        self.setWindowFlag(Qt.WindowType.WindowCloseButtonHint, False)  # No close button
+        self.setModal(True)
+        
+        # Main layout
+        layout = QVBoxLayout()
+        layout.setSpacing(20)
+        layout.setContentsMargins(30, 20, 30, 20)
+        
+        # Modern gradient background
+        self.setStyleSheet("""
+            QDialog {
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:1, 
+                    stop:0 #1e3c72, stop:1 #2a5298);
+                border-radius: 10px;
+            }
+            QLabel {
+                color: white;
+                background: transparent;
+            }
+            QProgressBar {
+                border: 2px solid #4CAF50;
+                border-radius: 8px;
+                text-align: center;
+                background-color: rgba(255, 255, 255, 0.1);
+                color: white;
+                font-weight: bold;
+                font-size: 12px;
+            }
+            QProgressBar::chunk {
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:0, 
+                    stop:0 #4CAF50, stop:1 #81C784);
+                border-radius: 6px;
+                margin: 2px;
+            }
+        """)
+        
+        # Icon and header
+        header_layout = QHBoxLayout()
+        
+        # Update icon
+        icon_label = QLabel()
+        icon_pixmap = self.style().standardPixmap(QStyle.StandardPixmap.SP_BrowserReload)
+        icon_label.setPixmap(icon_pixmap.scaled(32, 32, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation))
+        header_layout.addWidget(icon_label)
+        
+        # Title
+        title_label = QLabel("Installing Update")
+        title_label.setStyleSheet("font-size: 16px; font-weight: bold; color: white;")
+        header_layout.addWidget(title_label)
+        header_layout.addStretch()
+        
+        layout.addLayout(header_layout)
+        
+        # Version info
+        version_text = f"Updating to version {self.version}..." if self.version else "Installing update..."
+        self.version_label = QLabel(version_text)
+        self.version_label.setStyleSheet("font-size: 12px; color: #E3F2FD;")
+        layout.addWidget(self.version_label)
+        
+        # Progress bar
+        self.progress_bar = QProgressBar()
+        self.progress_bar.setRange(0, 0)  # Indeterminate progress
+        self.progress_bar.setTextVisible(True)
+        self.progress_bar.setFormat("Please wait...")
+        layout.addWidget(self.progress_bar)
+        
+        # Status label
+        self.status_label = QLabel("Preparing update installation...")
+        self.status_label.setStyleSheet("font-size: 11px; color: #BBDEFB;")
+        self.status_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(self.status_label)
+        
+        # Note
+        note_label = QLabel("The application will restart automatically when complete.")
+        note_label.setStyleSheet("font-size: 10px; color: #90CAF9; font-style: italic;")
+        note_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(note_label)
+        
+        self.setLayout(layout)
+        
+        # Center on screen
+        self.center_on_screen()
+        
+    def center_on_screen(self):
+        """Center the dialog on the screen"""
+        from PySide6.QtGui import QGuiApplication
+        screen = QGuiApplication.primaryScreen().geometry()
+        self.move(screen.center() - self.rect().center())
+        
+    def setup_animation(self):
+        """Setup status text animation"""
+        from PySide6.QtCore import QTimer
+        self.animation_timer = QTimer()
+        self.animation_timer.timeout.connect(self.update_status_animation)
+        self.animation_step = 0
+        self.status_messages = [
+            "Preparing update installation...",
+            "Stopping application services...",
+            "Installing new version...",
+            "Updating configuration...",
+            "Finalizing installation...",
+            "Starting updated application..."
+        ]
+        
+    def start_animation(self):
+        """Start the status animation"""
+        self.animation_timer.start(2000)  # Update every 2 seconds
+        
+    def update_status_animation(self):
+        """Update the status text to simulate progress"""
+        if self.animation_step < len(self.status_messages):
+            self.status_label.setText(self.status_messages[self.animation_step])
+            self.animation_step += 1
+        else:
+            # Loop back or stop
+            self.status_label.setText("Completing installation...")
+            
+    def stop_animation(self):
+        """Stop the animation"""
+        if hasattr(self, 'animation_timer'):
+            self.animation_timer.stop()
+
+
 def get_app_version():
     """Get app version from VERSION_BUILD or VERSION file or fallback to hardcoded"""
     import os
@@ -2090,6 +2270,69 @@ def get_app_version():
         pass
     # Fallback to environment variable or hardcoded
     return os.environ.get('FLIGHTTRACEPRO_APP_VERSION', '0.2.0')
+
+# ---------------- Single Instance Support ----------------
+SINGLE_INSTANCE_NAME = 'FlightTracePro_Bridge_SingleInstance'
+
+
+class _SingleInstanceServer:
+    """Listens for activation requests from subsequent instances"""
+
+    def __init__(self, name: str, on_activate):
+        self._name = name
+        self._on_activate = on_activate
+        self._server = QLocalServer()
+        # Remove stale server (in case of previous crash)
+        try:
+            QLocalServer.removeServer(self._name)
+        except Exception:
+            pass
+        self._server.newConnection.connect(self._handle_new_connection)
+        self._server.listen(self._name)
+
+    def _handle_new_connection(self):
+        try:
+            sock = self._server.nextPendingConnection()
+            if sock is None:
+                return
+            # Read any message (optional)
+            try:
+                if sock.waitForReadyRead(50):
+                    _ = bytes(sock.readAll()).decode('utf-8', 'ignore')
+            except Exception:
+                pass
+            try:
+                sock.disconnectFromServer()
+            except Exception:
+                pass
+        finally:
+            # Bring the window to front
+            try:
+                self._on_activate()
+            except Exception:
+                pass
+
+
+def _notify_existing_instance(name: str, message: str = 'activate') -> bool:
+    """Try to notify a running instance. Returns True if one was found."""
+    try:
+        sock = QLocalSocket()
+        sock.connectToServer(name)
+        if not sock.waitForConnected(150):
+            return False
+        try:
+            sock.write(message.encode('utf-8'))
+            sock.flush()
+            sock.waitForBytesWritten(50)
+        except Exception:
+            pass
+        try:
+            sock.disconnectFromServer()
+        except Exception:
+            pass
+        return True
+    except Exception:
+        return False
 
 def main():
     import sys
@@ -2112,9 +2355,28 @@ def main():
     # Create application with proper cleanup
     app = QApplication(sys.argv)
     app.setQuitOnLastWindowClosed(False)  # Keep running when window is closed (for tray)
+
+    # Enforce single instance: if another instance exists, ask it to activate and exit
+    if _notify_existing_instance(SINGLE_INSTANCE_NAME, 'activate'):
+        # Existing instance will bring its window to front
+        return 0
     
     try:
         win = MainWindow()
+
+        # Setup single-instance server to handle future activation requests
+        def _activate_main_window():
+            try:
+                if win.isMinimized():
+                    win.showNormal()
+                else:
+                    win.show()
+                win.raise_()
+                win.activateWindow()
+            except Exception:
+                pass
+
+        win._single_instance = _SingleInstanceServer(SINGLE_INSTANCE_NAME, _activate_main_window)
         win.show()
         
         # Run the application event loop
