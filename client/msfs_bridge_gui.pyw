@@ -1159,16 +1159,17 @@ start "" /b cmd /c del /f /q "%~f0" >nul 2>&1
 
 
 def get_app_version():
-    """Get app version from VERSION file or fallback to hardcoded"""
+    """Get app version from VERSION_BUILD or VERSION file or fallback to hardcoded"""
     try:
-        # Try to read from VERSION file (works in dev and should work in frozen)
-        version_file = os.path.join(os.path.dirname(__file__), 'VERSION')
-        if not os.path.exists(version_file) and getattr(sys, 'frozen', False):
-            # If frozen, VERSION might be in the same directory as the exe
-            version_file = os.path.join(os.path.dirname(sys.executable), 'VERSION')
-        if os.path.exists(version_file):
-            with open(version_file, 'r') as f:
-                return f.read().strip()
+        # First try VERSION_BUILD (created during CI build with run number)
+        for version_name in ['VERSION_BUILD', 'VERSION']:
+            version_file = os.path.join(os.path.dirname(__file__), version_name)
+            if not os.path.exists(version_file) and getattr(sys, 'frozen', False):
+                # If frozen, version files might be in the same directory as the exe
+                version_file = os.path.join(os.path.dirname(sys.executable), version_name)
+            if os.path.exists(version_file):
+                with open(version_file, 'r') as f:
+                    return f.read().strip()
     except Exception:
         pass
     # Fallback to environment variable or hardcoded

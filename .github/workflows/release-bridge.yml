@@ -17,12 +17,17 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Read version
+      - name: Read version and build number
         id: ver
         shell: bash
         run: |
-          VER=$(cat client/VERSION | tr -d '\r\n')
-          echo "VERSION=$VER" >> $GITHUB_ENV
+          BASE_VER=$(cat client/VERSION | tr -d '\r\n')
+          # Extract major.minor from base version (e.g., "0.2.0" -> "0.2")
+          MAJOR_MINOR=$(echo $BASE_VER | cut -d. -f1,2)
+          # Use GitHub run number as patch version
+          FULL_VERSION="${MAJOR_MINOR}.${GITHUB_RUN_NUMBER}"
+          echo "BASE_VERSION=$BASE_VER" >> $GITHUB_ENV
+          echo "VERSION=$FULL_VERSION" >> $GITHUB_ENV
 
       - name: Setup Python
         uses: actions/setup-python@v5
@@ -35,6 +40,11 @@ jobs:
           pip install -r client/requirements.txt
           pip install pyinstaller
 
+      - name: Create version file with build number
+        shell: bash
+        run: |
+          echo "${{ env.VERSION }}" > client/VERSION_BUILD
+
       - name: Build EXE
         shell: cmd
         run: |
@@ -43,8 +53,8 @@ jobs:
       - name: Create GitHub Release and upload asset
         uses: softprops/action-gh-release@v1
         with:
-          tag_name: flighttracepro-v${{ env.VERSION }}-${{ github.run_number }}
-          name: FlightTracePro v${{ env.VERSION }} (build ${{ github.run_number }})
+          tag_name: flighttracepro-v${{ env.VERSION }}
+          name: FlightTracePro v${{ env.VERSION }}
           draft: false
           prerelease: false
           files: |
