@@ -3,7 +3,7 @@
 import sys
 import os
 from pathlib import Path
-from PyInstaller.utils.hooks import collect_data_files
+from PyInstaller.utils.hooks import collect_data_files, collect_dynamic_libs
 
 block_cipher = None
 
@@ -11,6 +11,9 @@ block_cipher = None
 client_dir = Path(globals().get('SPECPATH', '.'))
 
 data_files = collect_data_files('certifi')
+# Include SimConnect package data and dynamic libraries so SimConnect.dll is available
+data_files += collect_data_files('SimConnect')
+simconnect_bins = collect_dynamic_libs('SimConnect')
 # Include VERSION files for version checking
 data_files.append((str(client_dir / 'VERSION'), '.'))
 # Include VERSION_BUILD file if it exists (created during CI build)
@@ -28,7 +31,7 @@ if hasattr(sys, 'base_exec_prefix'):
 a = Analysis(
     [str(client_dir / 'msfs_bridge_gui.pyw')],
     pathex=[str(client_dir)],
-    binaries=python_dll_binaries,
+    binaries=python_dll_binaries + simconnect_bins,
     datas=data_files,
     hiddenimports=[
         'SimConnect',

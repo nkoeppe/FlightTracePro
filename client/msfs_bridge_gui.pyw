@@ -31,6 +31,46 @@ class MSFSSource:
     def start(self) -> bool:
         self._log('INFO', "Attempting SimConnect initialization...")
         
+        # When frozen (PyInstaller), ensure the SimConnect DLL search path is available
+        try:
+            import os as _os, sys as _sys
+            if getattr(_sys, 'frozen', False):
+                # Add common extraction/installation dirs to the DLL search path
+                cand_dirs = []
+                cand_dirs.append(_os.path.dirname(_sys.executable))
+                cand_dirs.append(getattr(_sys, '_MEIPASS', None))
+                # Also check for a bundled SimConnect package directory next to the exe
+                cand_dirs.append(_os.path.join(_os.path.dirname(_sys.executable), 'SimConnect'))
+                seen = set()
+                for d in cand_dirs:
+                    if d and d not in seen and _os.path.isdir(d):
+                        seen.add(d)
+                        try:
+                            # Python 3.8+ secure DLL loading API
+                            from os import add_dll_directory as _add_dll_directory  # type: ignore
+                            _add_dll_directory(d)
+                        except Exception:
+                            # Fallback: prepend to PATH for legacy search
+                            try:
+                                _os.environ['PATH'] = d + _os.pathsep + _os.environ.get('PATH', '')
+                            except Exception:
+                                pass
+                # Best-effort pre-load if DLL sits next to the exe
+                try:
+                    import ctypes as _ct
+                    for _nm in ('SimConnect.dll', 'SimConnect64.dll'):
+                        _p = _os.path.join(_os.path.dirname(_sys.executable), _nm)
+                        if _os.path.exists(_p):
+                            try:
+                                _ct.WinDLL(_p)
+                                break
+                            except Exception:
+                                pass
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        
         # Step 1: Try to import SimConnect
         try:
             self._log('DEBUG', "Importing SimConnect module...")
@@ -221,7 +261,7 @@ class BridgeWorker(QThread):
             self.status.emit("websockets library not installed")
             self.log.emit("websockets library not installed")
             return
-        src = MSFSSource()
+        src = MSFSSource(log_cb=self._log)
         self._log("DEBUG", "Attempting SimConnect/WebSocket loop start")
         url = f"{self._server}/ws/live/{self._channel}?mode=feeder" + (f"&key={self._key}" if self._key else "")
         dt = 1.0 / self._rate_hz
@@ -277,13 +317,8 @@ class BridgeWorker(QThread):
                             except Exception:
                                 pass
                         else:
-                            # emit raw snapshot for debugging
-                            try:
-                                snap_lat = gv("PLANE LATITUDE") or gv("GPS POSITION LAT")
-                                snap_lon = gv("PLANE LONGITUDE") or gv("GPS POSITION LON")
-                                self._log("DEBUG", f"sample unavailable (lat={snap_lat} lon={snap_lon})")
-                            except Exception:
-                                self._log("DEBUG", "sample unavailable (lat/lon missing)")
+                            # Simplified debug when no valid sample present
+                            self._log("DEBUG", "sample unavailable (lat/lon missing)")
                         await asyncio.sleep(dt)
             except Exception as e:
                 self.status.emit(f"ws error: {e}")
@@ -299,7 +334,7 @@ class BridgeWorker(QThread):
         except Exception:
             self.status.emit("requests library not installed")
             return
-        src = MSFSSource()
+        src = MSFSSource(log_cb=self._log)
         url = f"{self._server}/api/live/{self._channel}"
         dt = 1.0 / self._rate_hz
         while not self._stop.is_set():
@@ -343,12 +378,8 @@ class BridgeWorker(QThread):
                     except Exception:
                         pass
                 else:
-                    try:
-                        snap_lat = gv("PLANE LATITUDE") or gv("GPS POSITION LAT")
-                        snap_lon = gv("PLANE LONGITUDE") or gv("GPS POSITION LON")
-                        self._log("DEBUG", f"sample unavailable (lat={snap_lat} lon={snap_lon})")
-                    except Exception:
-                        self._log("DEBUG", "sample unavailable (lat/lon missing)")
+                    # Simplified debug when no valid sample present
+                    self._log("DEBUG", "sample unavailable (lat/lon missing)")
             except Exception as e:
                 self.status.emit(f"http error: {e}")
                 self._log("ERROR", f"HTTP error: {e}")
