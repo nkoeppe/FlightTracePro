@@ -804,7 +804,7 @@ echo Step 5: Test complete - asking about restart...
 echo [%date% %time%] Step 5: Test complete - asking about restart... >> %LOGFILE%
 
 REM Show restart dialog for test too
-powershell -Command "Add-Type -AssemblyName System.Windows.Forms; $result = [System.Windows.Forms.MessageBox]::Show('TEST update completed!`n`nThis was just a test. Restart anyway?', 'Test Complete', [System.Windows.Forms.MessageBoxButtons]::YesNo, [System.Windows.Forms.MessageBoxIcon]::Information); if ($result -eq 'Yes') { exit 1 } else { exit 0 }"
+powershell -Command "Add-Type -AssemblyName System.Windows.Forms; $result = [System.Windows.Forms.MessageBox]::Show('TEST update completed!`n`nThis was just a test. Restart anyway?', 'Test Complete', [System.Windows.Forms.MessageBoxButtons]::YesNo, [System.Windows.Forms.MessageBoxIcon]::Information); if ($result -eq 'Yes') {{ exit 1 }} else {{ exit 0 }}"
 
 if errorlevel 1 (
     echo [%date% %time%] User chose to restart after test >> %LOGFILE%
@@ -1088,7 +1088,7 @@ echo [%date% %time%] Step 6: Update complete - asking user about restart... >> %
 
 REM Show restart dialog using PowerShell
 echo [%date% %time%] Showing restart dialog... >> %LOGFILE%
-powershell -Command "Add-Type -AssemblyName System.Windows.Forms; $result = [System.Windows.Forms.MessageBox]::Show('Update completed successfully!`n`nRestart FlightTracePro now?', 'Update Complete', [System.Windows.Forms.MessageBoxButtons]::YesNo, [System.Windows.Forms.MessageBoxIcon]::Information); if ($result -eq 'Yes') { exit 1 } else { exit 0 }"
+powershell -Command "Add-Type -AssemblyName System.Windows.Forms; $result = [System.Windows.Forms.MessageBox]::Show('Update completed successfully!`n`nRestart FlightTracePro now?', 'Update Complete', [System.Windows.Forms.MessageBoxButtons]::YesNo, [System.Windows.Forms.MessageBoxIcon]::Information); if ($result -eq 'Yes') {{ exit 1 }} else {{ exit 0 }}"
 
 if errorlevel 1 (
     echo [%date% %time%] User chose to restart now >> %LOGFILE%
@@ -1397,6 +1397,8 @@ class OptionsDialog(QDialog):
 
 def get_app_version():
     """Get app version from VERSION_BUILD or VERSION file or fallback to hardcoded"""
+    import os
+    import sys
     try:
         # First try VERSION_BUILD (created during CI build with run number)
         for version_name in ['VERSION_BUILD', 'VERSION']:
