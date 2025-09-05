@@ -585,6 +585,10 @@ class MainWindow(QMainWindow):
         t = threading.Thread(target=self._check_update, daemon=True)
         t.start()
 
+    def _get_app_version(self):
+        """Get app version from VERSION file or fallback to hardcoded"""
+        return get_app_version()
+
     def _check_update(self):
         import os, sys, json, tempfile, time
         try:
@@ -592,7 +596,7 @@ class MainWindow(QMainWindow):
         except ImportError:
             self.append_log("[update] requests library not available for auto-update")
             return
-        APP_VERSION = os.environ.get('FLIGHTTRACEPRO_APP_VERSION', '0.1.0')
+        APP_VERSION = self._get_app_version()
         REPO = os.environ.get('FLIGHTTRACEPRO_REPO', 'nkoeppe/FlightTracePro')  # set to 'owner/repo'
         if REPO == 'your-user/your-repo':
             return
@@ -1012,61 +1016,10 @@ echo Step 6: Restarting application...
 echo [%date% %time%] Step 6: Restarting application... >> %LOGFILE%
 timeout /t 2 /nobreak >nul
 
-echo Starting: %TARGET_EXE%
-echo [%date% %time%] Starting: %TARGET_EXE% >> %LOGFILE%
-REM Determine target directory and start app with correct working directory
-for %%I in ("%TARGET_NOQUOTE%") do set TARGET_DIR=%%~dpI
-REM Clear potential Python environment variables that can break PyInstaller child
-set PYTHONHOME=
-set PYTHONPATH=
-set PYTHONNOUSERSITE=
-set VIRTUAL_ENV=
-REM Set temp directory to a clean location to avoid DLL conflicts
-set TEMP=%LOCALAPPDATA%\FlightTraceProTemp
-set TMP=%LOCALAPPDATA%\FlightTraceProTemp
-if not exist "%TEMP%" mkdir "%TEMP%"
-set CONDA_PREFIX=
-set __PYVENV_LAUNCHER__=
-
-REM Ensure TEMP/TMP point to local user temp (if available)
-if defined LOCALAPPDATA (
-    set TEMP=%LOCALAPPDATA%\Temp
-    set TMP=%LOCALAPPDATA%\Temp
-)
-
-REM Warm up runtime via --version to pre-extract and pass AV
-set WARM_TRY=0
-:warmup_loop
-set /a WARM_TRY+=1
-"%TARGET_NOQUOTE%" --version >nul 2>&1
-if errorlevel 1 (
-    if %WARM_TRY% LSS 6 (
-        echo [%date% %time%] Warmup attempt %WARM_TRY% failed; waiting... >> %LOGFILE%
-        timeout /t 2 /nobreak >nul
-        goto warmup_loop
-    ) else (
-        echo [%date% %time%] Warmup failed after %WARM_TRY% attempts; continuing... >> %LOGFILE%
-    )
-) else (
-    echo [%date% %time%] Warmup succeeded on attempt %WARM_TRY% >> %LOGFILE%
-)
-
 REM Start application exactly like double-clicking using explorer
 echo [%date% %time%] Launching application via explorer... >> %LOGFILE%
 explorer "%TARGET_NOQUOTE%"
 echo [%date% %time%] Launch command issued >> %LOGFILE%
-
-REM Verify process is running, retry once if not
-for %%I in ("%TARGET_NOQUOTE%") do set EXE_NAME=%%~nxI
-timeout /t 3 /nobreak >nul
-tasklist /FI "IMAGENAME eq %EXE_NAME%" | find /I "%EXE_NAME%" >nul
-if errorlevel 1 (
-    echo [%date% %time%] Process not detected; retrying start after AV settle... >> %LOGFILE%
-    timeout /t 5 /nobreak >nul
-    echo [%date% %time%] Retrying launch via explorer... >> %LOGFILE%
-    explorer "%TARGET_NOQUOTE%"
-    echo [%date% %time%] Retry launch command issued >> %LOGFILE%
-)
 
 echo.
 echo Update complete! Application should restart now.
@@ -1205,6 +1158,22 @@ start "" /b cmd /c del /f /q "%~f0" >nul 2>&1
             self.append_log(f"[update] {e}")
 
 
+def get_app_version():
+    """Get app version from VERSION file or fallback to hardcoded"""
+    try:
+        # Try to read from VERSION file (works in dev and should work in frozen)
+        version_file = os.path.join(os.path.dirname(__file__), 'VERSION')
+        if not os.path.exists(version_file) and getattr(sys, 'frozen', False):
+            # If frozen, VERSION might be in the same directory as the exe
+            version_file = os.path.join(os.path.dirname(sys.executable), 'VERSION')
+        if os.path.exists(version_file):
+            with open(version_file, 'r') as f:
+                return f.read().strip()
+    except Exception:
+        pass
+    # Fallback to environment variable or hardcoded
+    return os.environ.get('FLIGHTTRACEPRO_APP_VERSION', '0.2.0')
+
 def main():
     import sys
     
@@ -1213,7 +1182,7 @@ def main():
         arg = sys.argv[1].lower()
         if arg in ['--version', '-v', '/version']:
             # Return version info for updater verification
-            version = os.environ.get('FLIGHTTRACEPRO_APP_VERSION', '0.1.0')
+            version = get_app_version()
             print(f"FlightTracePro Bridge v{version}")
             sys.exit(0)
         elif arg in ['--help', '-h', '/?']:

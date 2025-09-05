@@ -11,6 +11,8 @@ block_cipher = None
 client_dir = Path(globals().get('SPECPATH', '.'))
 
 data_files = collect_data_files('certifi')
+# Include VERSION file for version checking
+data_files.append((str(client_dir / 'VERSION'), '.'))
 
 # Ensure Python runtime DLLs are included
 python_dll_binaries = []
