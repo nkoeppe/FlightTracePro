@@ -12,7 +12,8 @@ from PySide6.QtGui import QIcon, QAction
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QGridLayout, QLabel, QLineEdit,
     QPushButton, QComboBox, QSpinBox, QHBoxLayout, QVBoxLayout, QSystemTrayIcon,
-    QMenu, QMessageBox, QStyle, QTextEdit
+    QMenu, QMessageBox, QStyle, QTextEdit, QDialog, QCheckBox, QDialogButtonBox,
+    QFrame
 )
 
 
@@ -398,13 +399,20 @@ class MainWindow(QMainWindow):
         logControls = QVBoxLayout()
         self.logLevel = QComboBox(); self.logLevel.addItems(["DEBUG","INFO","WARN","ERROR"]); self.logLevel.setCurrentText("INFO"); logControls.addWidget(self.logLevel)
         self.btnClearLogs = QPushButton("Clear Logs"); logControls.addWidget(self.btnClearLogs)
-        self.btnTestUpdate = QPushButton("Test Update"); self.btnTestUpdate.setToolTip("Test update mechanism with fake update"); logControls.addWidget(self.btnTestUpdate)
+        # Hide test update button (keep for debugging)
+        self.btnTestUpdate = QPushButton("Test Update"); self.btnTestUpdate.setToolTip("Test update mechanism with fake update"); self.btnTestUpdate.hide()
+        # Add proper Check for Updates button
+        self.btnCheckUpdates = QPushButton("Check for Updates"); self.btnCheckUpdates.setToolTip("Check for new versions on GitHub"); logControls.addWidget(self.btnCheckUpdates)
+        # Add Options button
+        self.btnOptions = QPushButton("Options"); self.btnOptions.setToolTip("Open application settings"); logControls.addWidget(self.btnOptions)
         logControlsWidget = QWidget(); logControlsWidget.setLayout(logControls)
         lay.addWidget(logControlsWidget, row, 3); row += 1
         
         self.logLevel.currentTextChanged.connect(self.on_level_changed)
         self.btnClearLogs.clicked.connect(self.clear_logs)
         self.btnTestUpdate.clicked.connect(self.test_update_mechanism)
+        self.btnCheckUpdates.clicked.connect(self.check_update_async)
+        self.btnOptions.clicked.connect(self.show_options_dialog)
 
         self.btnConnect.clicked.connect(self.on_connect)
         self.btnDisconnect.clicked.connect(self.on_disconnect)
@@ -415,7 +423,7 @@ class MainWindow(QMainWindow):
         self.tray.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_ComputerIcon))
         self.tray_menu = QMenu()
         act_show = QAction("Open", self); act_show.triggered.connect(self.showNormal); self.tray_menu.addAction(act_show)
-        act_quit = QAction("Quit", self); act_quit.triggered.connect(self.close); self.tray_menu.addAction(act_quit)
+        act_quit = QAction("Quit", self); act_quit.triggered.connect(self.quit_application); self.tray_menu.addAction(act_quit)
         self.tray.setContextMenu(self.tray_menu)
         self.tray.activated.connect(self._on_tray)
         self.tray.show()
@@ -441,9 +449,63 @@ class MainWindow(QMainWindow):
                 self.hide()
 
     def closeEvent(self, e):
-        # Minimize to tray
+        # Check if user has set a remembered preference
+        close_action = self.settings.value("closeAction", "ask", type=str)
+        
+        if close_action == "minimize":
+            self._minimize_to_tray()
+            e.ignore()
+        elif close_action == "quit":
+            self.quit_application()
+            e.accept()
+        else:
+            # Show custom close dialog
+            dialog = CloseDialog(self)
+            result = dialog.exec()
+            
+            if result == QDialog.DialogCode.Accepted:
+                action, remember = dialog.get_result()
+                
+                if remember:
+                    self.settings.setValue("closeAction", action)
+                
+                if action == "minimize":
+                    self._minimize_to_tray()
+                    e.ignore()
+                else:  # quit
+                    self.quit_application()
+                    e.accept()
+            else:
+                # Cancel - do nothing
+                e.ignore()
+    
+    def _minimize_to_tray(self):
+        """Minimize to tray with notification"""
         self.hide()
-        e.ignore()
+        
+        # Show tray notification
+        if self.tray and self.tray.supportsMessages():
+            self.tray.showMessage(
+                "FlightTracePro",
+                "Application is running in the background. Click the tray icon to restore.",
+                QSystemTrayIcon.MessageIcon.Information,
+                3000  # 3 seconds
+            )
+
+    def quit_application(self):
+        """Properly quit the application"""
+        # Stop worker if running
+        if self.worker:
+            self.worker.stop()
+            self.worker.wait(1000)
+            self.worker = None
+        
+        # Hide tray icon
+        if self.tray:
+            self.tray.hide()
+        
+        # Quit application
+        QApplication.quit()
 
     @Slot()
     def on_connect(self):
@@ -581,9 +643,24 @@ class MainWindow(QMainWindow):
 
     # --- Self-update (GitHub Releases) ---
     def check_update_async(self):
+        # Disable button and show checking status
+        self.btnCheckUpdates.setEnabled(False)
+        self.btnCheckUpdates.setText("Checking...")
+        self.append_log("[update] Manually checking for updates...")
+        
         import threading
-        t = threading.Thread(target=self._check_update, daemon=True)
+        t = threading.Thread(target=self._check_update_with_ui_reset, daemon=True)
         t.start()
+    
+    def _check_update_with_ui_reset(self):
+        """Wrapper for _check_update that resets UI afterwards"""
+        try:
+            self._check_update()
+        finally:
+            # Reset button state
+            if hasattr(self, 'btnCheckUpdates'):
+                self.btnCheckUpdates.setEnabled(True)
+                self.btnCheckUpdates.setText("Check for Updates")
 
     def _get_app_version(self):
         """Get app version from VERSION file or fallback to hardcoded"""
@@ -627,7 +704,7 @@ class MainWindow(QMainWindow):
             self.append_log(f"[update] Current: {APP_VERSION} ({current_version}), Latest: {ver} ({latest_version})")
             
             if latest_version <= current_version:
-                self.append_log("[update] Already up to date")
+                self.append_log(f"[update] ✅ Already up to date (v{APP_VERSION} is latest)")
                 return
             # find exe asset
             assets = rel.get('assets', [])
@@ -651,7 +728,7 @@ class MainWindow(QMainWindow):
         """Show update prompt in main thread"""
         from PySide6.QtWidgets import QMessageBox
         ret = QMessageBox.information(self, 'Update Available', 
-                                    f'New version {version} available. Update now?', 
+                                    f'New version {version} available. Download and install now?', 
                                     QMessageBox.Yes | QMessageBox.No)
         if ret != QMessageBox.Yes:
             return
@@ -723,18 +800,24 @@ echo [%date% %time%] Step 3: TEST installation >> %LOGFILE%
 echo Step 4: TEST - Would clean up here...
 echo [%date% %time%] Step 4: TEST cleanup >> %LOGFILE%
 
-echo Step 5: Restarting application...
-echo [%date% %time%] Step 5: Restarting application... >> %LOGFILE%
-timeout /t 2 /nobreak >nul
+echo Step 5: Test complete - asking about restart...
+echo [%date% %time%] Step 5: Test complete - asking about restart... >> %LOGFILE%
 
-echo Starting: %TARGET_EXE%
-echo [%date% %time%] Starting: %TARGET_EXE% >> %LOGFILE%
-start "" %TARGET_EXE%
+REM Show restart dialog for test too
+powershell -Command "Add-Type -AssemblyName System.Windows.Forms; $result = [System.Windows.Forms.MessageBox]::Show('TEST update completed!`n`nThis was just a test. Restart anyway?', 'Test Complete', [System.Windows.Forms.MessageBoxButtons]::YesNo, [System.Windows.Forms.MessageBoxIcon]::Information); if ($result -eq 'Yes') { exit 1 } else { exit 0 }"
 
-echo.
-echo TEST UPDATE COMPLETE! Application should restart now.
+if errorlevel 1 (
+    echo [%date% %time%] User chose to restart after test >> %LOGFILE%
+    echo Starting: %TARGET_EXE%
+    echo [%date% %time%] Starting: %TARGET_EXE% >> %LOGFILE%
+    start "" %TARGET_EXE%
+    echo TEST UPDATE COMPLETE! Application is restarting...
+) else (
+    echo [%date% %time%] User chose not to restart after test >> %LOGFILE%
+    echo TEST UPDATE COMPLETE! No restart needed.
+)
+
 echo [%date% %time%] TEST update process completed >> %LOGFILE%
-timeout /t 3 /nobreak >nul
 
 REM Cleanup test files
 echo [%date% %time%] Cleaning up test files... >> %LOGFILE%
@@ -877,13 +960,11 @@ echo Log file: %LOGFILE%
 
 echo Step 1: Waiting for application to close...
 echo [%date% %time%] Step 1: Waiting for app to close... >> %LOGFILE%
-timeout /t 5 /nobreak >nul
+REM Quick check that process has exited
+timeout /t 1 /nobreak >nul
 
-echo Step 2: Extended wait for file system...
-echo [%date% %time%] Step 2: Extended wait for file system... >> %LOGFILE%
-echo Waiting 3 more seconds for Windows to fully release file locks...
-timeout /t 3 /nobreak >nul
-echo [%date% %time%] Extended wait completed >> %LOGFILE%
+echo Step 2: File system ready
+echo [%date% %time%] Step 2: File system ready >> %LOGFILE%
 
 echo Step 3: Creating backup...
 echo [%date% %time%] Step 3: Creating backup... >> %LOGFILE%
@@ -944,8 +1025,7 @@ echo Installing new version... (attempt !UPDATE_RETRY!/20)
 REM Delete target first to reduce conflicts
 if exist %TARGET_EXE% del %TARGET_EXE% >nul 2>&1
 
-REM Wait a moment for filesystem
-timeout /t 1 /nobreak >nul
+REM No wait needed - Windows handles this well
 
 REM Copy with /Y flag for overwrite
 copy /Y %NEW_EXE% %TARGET_EXE% >nul 2>&1
@@ -970,23 +1050,14 @@ if exist %TARGET_EXE% (
     echo Copy failed - target file missing
 )
 
-REM Retry logic with exponential backoff
-if !UPDATE_RETRY! LSS 20 (
-    if !UPDATE_RETRY! LSS 5 (
-        set WAIT_TIME=1
-    ) else if !UPDATE_RETRY! LSS 10 (
-        set WAIT_TIME=2
-    ) else (
-        set WAIT_TIME=3
-    )
-    
-    echo [%date% %time%] Copy failed, waiting !WAIT_TIME! seconds before retry... >> %LOGFILE%
-    echo Copy failed, waiting !WAIT_TIME! seconds before retry...
-    timeout /t !WAIT_TIME! /nobreak >nul
+REM Fast retry logic - no waiting needed
+if !UPDATE_RETRY! LSS 10 (
+    echo [%date% %time%] Copy failed, retrying immediately... >> %LOGFILE%
+    echo Copy failed, retrying (attempt !UPDATE_RETRY!/10)...
     goto update_retry
 ) else (
-    echo [%date% %time%] ERROR: Update failed after 20 attempts! >> %LOGFILE%
-    echo ERROR: Update failed after 20 attempts!
+    echo [%date% %time%] ERROR: Update failed after 10 attempts! >> %LOGFILE%
+    echo ERROR: Update failed after 10 attempts!
     echo.  
     echo This is likely caused by:
     echo - Windows Defender real-time protection
@@ -1012,19 +1083,32 @@ echo [%date% %time%] Step 5: Cleaning up... >> %LOGFILE%
 del %BACKUP_EXE% >nul 2>&1
 del %NEW_EXE% >nul 2>&1
 
-echo Step 6: Restarting application...
-echo [%date% %time%] Step 6: Restarting application... >> %LOGFILE%
-timeout /t 2 /nobreak >nul
+echo Step 6: Update complete - asking user about restart...
+echo [%date% %time%] Step 6: Update complete - asking user about restart... >> %LOGFILE%
 
-REM Start application exactly like double-clicking using explorer
-echo [%date% %time%] Launching application via explorer... >> %LOGFILE%
-explorer "%TARGET_NOQUOTE%"
-echo [%date% %time%] Launch command issued >> %LOGFILE%
+REM Show restart dialog using PowerShell
+echo [%date% %time%] Showing restart dialog... >> %LOGFILE%
+powershell -Command "Add-Type -AssemblyName System.Windows.Forms; $result = [System.Windows.Forms.MessageBox]::Show('Update completed successfully!`n`nRestart FlightTracePro now?', 'Update Complete', [System.Windows.Forms.MessageBoxButtons]::YesNo, [System.Windows.Forms.MessageBoxIcon]::Information); if ($result -eq 'Yes') { exit 1 } else { exit 0 }"
 
-echo.
-echo Update complete! Application should restart now.
+if errorlevel 1 (
+    echo [%date% %time%] User chose to restart now >> %LOGFILE%
+    echo Restarting application now...
+    
+    REM Start application exactly like double-clicking using explorer
+    echo [%date% %time%] Launching application via explorer... >> %LOGFILE%
+    explorer "%TARGET_NOQUOTE%"
+    echo [%date% %time%] Launch command issued >> %LOGFILE%
+    
+    echo Update complete! Application is restarting...
+) else (
+    echo [%date% %time%] User chose to restart later >> %LOGFILE%
+    echo Update complete! Please restart FlightTracePro when convenient.
+    echo.
+    echo The new version will be active after you restart the application.
+    pause
+)
+
 echo [%date% %time%] Update process completed >> %LOGFILE%
-timeout /t 3 /nobreak >nul
 
 REM Self-delete (but keep log file for debugging)
 echo [%date% %time%] Self-deleting batch file... >> %LOGFILE%
@@ -1156,6 +1240,159 @@ start "" /b cmd /c del /f /q "%~f0" >nul 2>&1
                     self.append_log(f"[update] Manual test failed: {test_error}")
         except Exception as e:
             self.append_log(f"[update] {e}")
+    
+    def show_options_dialog(self):
+        """Show options dialog"""
+        dialog = OptionsDialog(self)
+        dialog.exec()
+
+
+class CloseDialog(QDialog):
+    """Custom close dialog with better styling"""
+    
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("FlightTracePro")
+        self.setFixedSize(400, 200)
+        self.setModal(True)
+        
+        # Main layout
+        layout = QVBoxLayout(self)
+        layout.setSpacing(20)
+        
+        # Icon and message
+        msg_layout = QHBoxLayout()
+        
+        # Icon label
+        icon_label = QLabel()
+        icon_label.setPixmap(self.style().standardIcon(QStyle.StandardPixmap.SP_ComputerIcon).pixmap(48, 48))
+        icon_label.setAlignment(Qt.AlignmentFlag.AlignTop)
+        msg_layout.addWidget(icon_label)
+        
+        # Message text
+        msg_label = QLabel("What would you like to do when closing FlightTracePro?")
+        msg_label.setWordWrap(True)
+        msg_label.setStyleSheet("font-size: 12px; font-weight: bold; margin-left: 10px;")
+        msg_layout.addWidget(msg_label, 1)
+        
+        layout.addLayout(msg_layout)
+        
+        # Separator
+        line = QFrame()
+        line.setFrameShape(QFrame.Shape.HLine)
+        line.setFrameShadow(QFrame.Shadow.Sunken)
+        layout.addWidget(line)
+        
+        # Options
+        options_layout = QVBoxLayout()
+        options_layout.setSpacing(10)
+        
+        self.minimize_btn = QPushButton("🗗 Minimize to system tray")
+        self.minimize_btn.setStyleSheet("QPushButton { text-align: left; padding: 10px; font-size: 11px; }")
+        self.minimize_btn.setToolTip("Keep FlightTracePro running in the background")
+        self.minimize_btn.clicked.connect(lambda: self.accept_with_action("minimize"))
+        options_layout.addWidget(self.minimize_btn)
+        
+        self.quit_btn = QPushButton("❌ Exit application")
+        self.quit_btn.setStyleSheet("QPushButton { text-align: left; padding: 10px; font-size: 11px; }")
+        self.quit_btn.setToolTip("Completely close FlightTracePro")
+        self.quit_btn.clicked.connect(lambda: self.accept_with_action("quit"))
+        options_layout.addWidget(self.quit_btn)
+        
+        layout.addLayout(options_layout)
+        
+        # Remember choice checkbox
+        self.remember_cb = QCheckBox("Remember my choice for next time")
+        self.remember_cb.setStyleSheet("margin-top: 10px;")
+        layout.addWidget(self.remember_cb)
+        
+        # Buttons
+        button_layout = QHBoxLayout()
+        button_layout.addStretch()
+        
+        cancel_btn = QPushButton("Cancel")
+        cancel_btn.clicked.connect(self.reject)
+        button_layout.addWidget(cancel_btn)
+        
+        layout.addLayout(button_layout)
+        
+        # Set default focus
+        self.minimize_btn.setFocus()
+        
+        # Instance variables
+        self.selected_action = None
+    
+    def accept_with_action(self, action):
+        self.selected_action = action
+        self.accept()
+    
+    def get_result(self):
+        return self.selected_action, self.remember_cb.isChecked()
+
+
+class OptionsDialog(QDialog):
+    """Options dialog for application settings"""
+    
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.parent_window = parent
+        self.setWindowTitle("FlightTracePro Options")
+        self.setFixedSize(450, 300)
+        self.setModal(True)
+        
+        layout = QVBoxLayout(self)
+        layout.setSpacing(20)
+        
+        # Title
+        title = QLabel("Application Settings")
+        title.setStyleSheet("font-size: 16px; font-weight: bold; margin-bottom: 10px;")
+        layout.addWidget(title)
+        
+        # Settings section
+        settings_group = QFrame()
+        settings_group.setFrameStyle(QFrame.Shape.Box)
+        settings_group.setStyleSheet("QFrame { border: 1px solid #ccc; border-radius: 5px; padding: 10px; }")
+        
+        settings_layout = QVBoxLayout(settings_group)
+        
+        # Close behavior setting
+        close_label = QLabel("Close button behavior:")
+        close_label.setStyleSheet("font-weight: bold; margin-bottom: 5px;")
+        settings_layout.addWidget(close_label)
+        
+        self.close_combo = QComboBox()
+        self.close_combo.addItem("Ask me every time", "ask")
+        self.close_combo.addItem("Always minimize to tray", "minimize")
+        self.close_combo.addItem("Always exit application", "quit")
+        
+        # Set current value
+        current_action = parent.settings.value("closeAction", "ask", type=str)
+        for i in range(self.close_combo.count()):
+            if self.close_combo.itemData(i) == current_action:
+                self.close_combo.setCurrentIndex(i)
+                break
+        
+        settings_layout.addWidget(self.close_combo)
+        
+        # Future settings can be added here
+        settings_layout.addStretch()
+        
+        layout.addWidget(settings_group)
+        
+        # Button box
+        button_box = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        button_box.accepted.connect(self.accept)
+        button_box.rejected.connect(self.reject)
+        
+        layout.addWidget(button_box)
+    
+    def accept(self):
+        # Save settings
+        selected_action = self.close_combo.currentData()
+        self.parent_window.settings.setValue("closeAction", selected_action)
+        super().accept()
 
 
 def get_app_version():
