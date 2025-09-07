@@ -60,6 +60,23 @@ class LiveSample(BaseModel):
     ts: float | None = None  # epoch seconds
     callsign: str | None = None
     aircraft: str | None = None
+    # Engine data
+    rpm_pct: float | None = None
+    fuel_flow_gph: float | None = None
+    throttle_pct: float | None = None
+    # Autopilot status
+    ap_master: bool | None = None
+    ap_hdg_lock: bool | None = None
+    ap_alt_lock: bool | None = None
+    ap_speed_hold: bool | None = None
+    ap_vs_hold: bool | None = None
+    ap_nav_lock: bool | None = None
+    ap_approach_arm: bool | None = None
+    # Autopilot targets
+    ap_hdg_target: float | None = None
+    ap_alt_target: float | None = None
+    ap_speed_target: float | None = None
+    ap_vs_target: float | None = None
 
 class ChannelState:
     def __init__(self):
@@ -1985,15 +2002,18 @@ INDEX_HTML = """
 
       /* Aircraft Tooltip Styling - Match Telemetry Cards */
       .aircraft-telemetry-tooltip {
-        background: var(--glass-bg) !important;
-        backdrop-filter: var(--glass-backdrop-filter);
-        -webkit-backdrop-filter: var(--glass-backdrop-filter);
-        border: 1px solid var(--glass-border) !important;
+        background: rgba(0, 0, 0, 0.9) !important;
+        backdrop-filter: blur(8px);
+        -webkit-backdrop-filter: blur(8px);
+        border: 1px solid rgba(255, 255, 255, 0.2) !important;
         border-radius: var(--md-sys-shape-corner-medium) !important;
-        box-shadow: var(--glass-shadow) !important;
+        box-shadow: 0 8px 32px rgba(0, 0, 0, 0.4) !important;
         padding: 16px !important;
         min-width: 280px;
-        color: var(--md-sys-color-on-surface) !important;
+        color: #ffffff !important;
+        z-index: 10000 !important;
+        pointer-events: auto !important;
+        position: relative !important;
       }
       
       .aircraft-callsign {
@@ -2060,10 +2080,38 @@ INDEX_HTML = """
         background: transparent !important;
         border: none !important;
         box-shadow: none !important;
+        z-index: 10000 !important;
+        pointer-events: auto !important;
       }
       
       .leaflet-tooltip.aircraft-tooltip::before {
         display: none !important;
+      }
+
+      /* Popup styling */
+      .leaflet-popup.aircraft-popup .leaflet-popup-content-wrapper {
+        background: transparent !important;
+        border: none !important;
+        box-shadow: none !important;
+      }
+      .leaflet-popup.aircraft-popup .leaflet-popup-tip {
+        background: transparent !important;
+        border: none !important;
+      }
+      .leaflet-popup.aircraft-popup .leaflet-popup-content {
+        margin: 10px 12px;
+      }
+      .leaflet-popup-content .aircraft-telemetry-tooltip {
+        background: rgba(0, 0, 0, 0.92);
+        border: 1px solid rgba(255, 255, 255, 0.2);
+        border-radius: var(--md-sys-shape-corner-medium);
+        box-shadow: 0 8px 32px rgba(0,0,0,0.45);
+        padding: 16px;
+        min-width: 280px;
+        color: #fff;
+        pointer-events: auto;
+        backdrop-filter: blur(8px);
+        -webkit-backdrop-filter: blur(8px);
       }
 
       /* Interactive Elements */
@@ -2252,6 +2300,191 @@ INDEX_HTML = """
         100% {
           left: 100%;
         }
+      }
+
+      /* Futuristic Sci-Fi HUD Styles */
+      .scifi-panel {
+        position: absolute;
+        background: linear-gradient(135deg, rgba(0,255,255,0.05) 0%, rgba(0,100,255,0.08) 100%);
+        border: 1px solid rgba(0,255,255,0.3);
+        border-radius: 8px;
+        backdrop-filter: blur(12px);
+        padding: 16px;
+        box-shadow: 
+          0 0 20px rgba(0,255,255,0.2),
+          inset 0 1px 0 rgba(255,255,255,0.1);
+        animation: scifi-pulse 3s ease-in-out infinite alternate;
+      }
+
+      @keyframes scifi-pulse {
+        0% { box-shadow: 0 0 20px rgba(0,255,255,0.2), inset 0 1px 0 rgba(255,255,255,0.1); }
+        100% { box-shadow: 0 0 30px rgba(0,255,255,0.4), inset 0 1px 0 rgba(255,255,255,0.2); }
+      }
+
+      .scifi-main-panel { top: 0; left: 0; width: 320px; height: 240px; }
+      .scifi-engine-panel { top: 0; right: 0; width: 260px; height: 180px; }
+      .scifi-attitude-panel { bottom: 0; right: 0; width: 200px; height: 200px; }
+
+      .scifi-header {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        margin-bottom: 12px;
+        padding-bottom: 8px;
+        border-bottom: 1px solid rgba(0,255,255,0.3);
+      }
+
+      .scifi-title {
+        font-size: 10px;
+        font-weight: 700;
+        color: #00ffff;
+        letter-spacing: 1px;
+        text-transform: uppercase;
+      }
+
+      .scifi-status-indicator {
+        width: 8px;
+        height: 8px;
+        background: #00ff00;
+        border-radius: 50%;
+        animation: scifi-blink 2s ease-in-out infinite;
+        box-shadow: 0 0 8px #00ff00;
+      }
+
+      @keyframes scifi-blink {
+        0%, 100% { opacity: 1; }
+        50% { opacity: 0.3; }
+      }
+
+      .scifi-aircraft-info { margin-bottom: 16px; }
+
+      .scifi-callsign {
+        font-size: 18px;
+        font-weight: 700;
+        color: #ffffff;
+        text-shadow: 0 0 8px rgba(255,255,255,0.5);
+        margin-bottom: 4px;
+      }
+
+      .scifi-aircraft-model {
+        font-size: 11px;
+        color: #00ffff;
+        margin-bottom: 6px;
+      }
+
+      .scifi-flight-mode {
+        font-size: 9px;
+        color: #ffaa00;
+        font-weight: 600;
+        text-transform: uppercase;
+        letter-spacing: 0.5px;
+      }
+
+      .scifi-grid {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 12px;
+      }
+
+      .scifi-readout {
+        display: flex;
+        flex-direction: column;
+        gap: 4px;
+      }
+
+      .scifi-label {
+        font-size: 8px;
+        color: #00ffff;
+        font-weight: 600;
+        text-transform: uppercase;
+        letter-spacing: 0.8px;
+      }
+
+      .scifi-value {
+        font-size: 14px;
+        color: #ffffff;
+        font-weight: 700;
+        text-shadow: 0 0 6px rgba(255,255,255,0.4);
+        min-height: 20px;
+      }
+
+      .scifi-bar {
+        width: 100%;
+        height: 4px;
+        background: rgba(0,255,255,0.2);
+        border-radius: 2px;
+        overflow: hidden;
+        position: relative;
+      }
+
+      .scifi-bar-fill {
+        height: 100%;
+        background: linear-gradient(90deg, #00ffff, #0080ff);
+        border-radius: 2px;
+        transition: width 0.3s ease;
+        box-shadow: 0 0 8px rgba(0,255,255,0.5);
+      }
+
+      .scifi-engine-grid {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 16px;
+      }
+
+      .scifi-engine-readout {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        gap: 8px;
+      }
+
+      .scifi-circular-progress {
+        width: 60px;
+        height: 60px;
+        border: 2px solid rgba(0,255,255,0.2);
+        border-radius: 50%;
+        position: relative;
+        background: radial-gradient(circle, rgba(0,255,255,0.05) 0%, transparent 70%);
+      }
+
+      .scifi-circular-progress::after {
+        content: '';
+        position: absolute;
+        top: -2px;
+        left: -2px;
+        width: 60px;
+        height: 60px;
+        border: 2px solid transparent;
+        border-top: 2px solid #00ffff;
+        border-radius: 50%;
+        transform: rotate(var(--rpm-rotation, 0deg));
+        transition: transform 0.5s ease;
+        box-shadow: 0 0 10px rgba(0,255,255,0.3);
+      }
+
+      .scifi-compass {
+        width: 40px;
+        height: 40px;
+        border: 1px solid rgba(0,255,255,0.4);
+        border-radius: 50%;
+        position: relative;
+        margin: 4px auto;
+        background: radial-gradient(circle, rgba(0,255,255,0.1) 0%, transparent 70%);
+      }
+
+      .scifi-compass::after {
+        content: '';
+        position: absolute;
+        top: 2px;
+        left: 50%;
+        width: 2px;
+        height: 16px;
+        background: #ff0040;
+        transform-origin: bottom center;
+        border-radius: 1px;
+        box-shadow: 0 0 4px #ff0040;
+        transform: translateX(-50%) rotate(var(--heading-rotation, 0deg));
+        transition: transform 0.3s ease;
       }
     </style>
   </head>
@@ -2487,12 +2720,26 @@ INDEX_HTML = """
               </div>
             </div>
             <div>
+              <label class="lbl">Color Mode</label>
+              <div style="display:flex; gap:8px; align-items:center; margin-bottom:16px;">
+                <button id="colorblind_toggle" class="outlined active" type="button" style="padding:8px 16px; font-size:13px;">Standard Colors</button>
+                <div class="help" style="margin-left:8px; font-size:12px; opacity:0.8;">Better visibility for color vision deficiencies</div>
+              </div>
+            </div>
+            <div>
               <label class="lbl">Connection</label><br/>
               <div style="display: flex; gap: 8px;">
                 <button id="live_connect" type="button">Connect</button>
                 <button id="live_disconnect" type="button" class="outlined">Disconnect</button>
                 <button id="live_center" type="button" class="secondary">Center Map</button>
               </div>
+            </div>
+            <div>
+              <label class="lbl">Persistence</label>
+              <label style="display:flex; align-items:center; gap:8px; font-size:13px; cursor:pointer; user-select: none;">
+                <input id="persist_toggle" type="checkbox" checked /> Save tracks (IndexedDB)
+              </label>
+              <div class="help" style="font-size:12px; opacity:0.8;">Keeps recent history across reloads</div>
             </div>
           </div>
           
@@ -2517,20 +2764,134 @@ INDEX_HTML = """
                 <option value="flat" selected>Flat</option>
                 <option value="real">Real Terrain</option>
               </select>
-              <button id="live_follow" class="tabbtn" type="button">Follow</button>
+              <div style="display:flex; align-items:center; gap:8px;">
+                <button id="live_follow" class="tabbtn" type="button">Follow</button>
+                <select id="live_follow_dropdown" class="small" style="display:none; min-width:120px;">
+                  <option value="">Select Aircraft</option>
+                </select>
+              </div>
               <button id="live_home3d" class="tabbtn" type="button">Home View</button>
-              <button id="live_debug3d" class="tabbtn" type="button">Debug Info</button>
+              <button id="live_debug_info" class="tabbtn" type="button">Debug Info</button>
+              <button id="live_telemetry_cycle" class="tabbtn" type="button">Telem Cycle</button>
+              <button id="live_scifi_toggle" class="tabbtn" type="button">Sci-Fi HUD</button>
               <span class="note" style="margin-left:auto;">Channel: <span id="live_ch_label" style="font-weight: 500; color: var(--md-sys-color-primary);">default</span></span>
             </div>
             <div id="livemap" class="active"></div>
             <div id="liveglobe"></div>
-            <div id="live_hud" class="telemetry" style="position:absolute; left:24px; top:100px; z-index:500; display:flex;">
+            <div id="live_snackbar" style="
+              position: fixed; left: 50%; bottom: 24px; transform: translateX(-50%);
+              background: rgba(20,20,20,0.95); color: #fff; padding: 10px 16px; border-radius: 6px;
+              box-shadow: 0 6px 16px rgba(0,0,0,0.35); font-size: 13px; display: none; z-index: 9999;
+            "></div>
+            <div id="live_debug_overlay" style="position:absolute; right:16px; top:80px; z-index:600; background: rgba(0,0,0,0.85); color:#fff; padding:12px 16px; border-radius:8px; font-family: ui-monospace, 'Cascadia Code', Consolas, monospace; font-size:11px; line-height:1.4; display:none; max-width: 350px; white-space: pre-line; pointer-events: none; box-shadow: 0 4px 12px rgba(0,0,0,0.3);"></div>
+            <div id="live_hud" class="telemetry" style="position:absolute; left:24px; top:100px; z-index:500; display:flex; flex-wrap:wrap; gap:12px; max-width:calc(100% - 48px);">
+              <div class="tile wide" id="aircraft_info_tile" style="display:none;">
+                <div class="label">Aircraft</div>
+                <div class="value" style="flex-direction:column; align-items:flex-start; gap:4px;">
+                  <div style="font-size:14px; font-weight:700; color:var(--md-sys-color-primary);">
+                    <span id="lv_callsign">-</span>
+                  </div>
+                  <div style="font-size:11px; opacity:0.9;">
+                    <span id="lv_aircraft_model">-</span>
+                  </div>
+                </div>
+              </div>
               <div class="tile"><div class="label">ALT</div><div class="value"><span id="lv_alt">-</span><span class="unit">m</span></div></div>
               <div class="tile"><div class="label">SPD</div><div class="value"><span id="lv_spd">-</span><span class="unit">kt</span></div></div>
               <div class="tile"><div class="label">VSI</div><div class="value"><span id="lv_vsi">-</span><span class="unit">m/s</span></div></div>
               <div class="tile"><div class="label">HDG</div><div class="value"><span id="lv_hdg">-</span><span class="unit">°</span></div></div>
               <div class="tile"><div class="label">PITCH</div><div class="value"><span id="lv_pitch">-</span><span class="unit">°</span></div></div>
               <div class="tile"><div class="label">ROLL</div><div class="value"><span id="lv_roll">-</span><span class="unit">°</span></div></div>
+              <div class="tile"><div class="label">RPM</div><div class="value"><span id="lv_rpm">-</span><span class="unit">%</span></div></div>
+              <div class="tile"><div class="label">FUEL</div><div class="value"><span id="lv_fuel_flow">-</span><span class="unit">gph</span></div></div>
+            </div>
+            
+            <!-- Futuristic Sci-Fi Telemetry HUD -->
+            <div id="live_scifi_hud" style="display:none; position:absolute; left:20px; top:80px; right:20px; bottom:20px; z-index:550; pointer-events:none; font-family: 'SF Mono', 'Monaco', 'Cascadia Code', 'Roboto Mono', monospace;">
+              
+              <!-- Main Aircraft Info Panel -->
+              <div class="scifi-panel scifi-main-panel" id="scifi_aircraft_panel" style="display:none;">
+                <div class="scifi-header">
+                  <div class="scifi-title">FLIGHT CONTROL SYSTEM</div>
+                  <div class="scifi-status-indicator"></div>
+                </div>
+                <div class="scifi-aircraft-info">
+                  <div class="scifi-callsign"><span id="scifi_callsign">N/A</span></div>
+                  <div class="scifi-aircraft-model"><span id="scifi_aircraft_model">Unknown Aircraft</span></div>
+                  <div class="scifi-flight-mode">CRUISE MODE</div>
+                </div>
+                <div class="scifi-grid">
+                  <div class="scifi-readout">
+                    <span class="scifi-label">ALTITUDE</span>
+                    <span class="scifi-value"><span id="scifi_alt">----</span> M</span>
+                    <div class="scifi-bar"><div class="scifi-bar-fill" id="scifi_alt_bar"></div></div>
+                  </div>
+                  <div class="scifi-readout">
+                    <span class="scifi-label">VELOCITY</span>
+                    <span class="scifi-value"><span id="scifi_spd">---</span> KT</span>
+                    <div class="scifi-bar"><div class="scifi-bar-fill" id="scifi_spd_bar"></div></div>
+                  </div>
+                  <div class="scifi-readout">
+                    <span class="scifi-label">V/SPEED</span>
+                    <span class="scifi-value"><span id="scifi_vsi">--.-</span> M/S</span>
+                    <div class="scifi-bar"><div class="scifi-bar-fill" id="scifi_vsi_bar"></div></div>
+                  </div>
+                  <div class="scifi-readout">
+                    <span class="scifi-label">HEADING</span>
+                    <span class="scifi-value"><span id="scifi_hdg">---</span>°</span>
+                    <div class="scifi-compass" id="scifi_compass"></div>
+                  </div>
+                </div>
+              </div>
+              
+              <!-- Engine Status Panel -->
+              <div class="scifi-panel scifi-engine-panel">
+                <div class="scifi-header">
+                  <div class="scifi-title">ENGINE STATUS</div>
+                  <div class="scifi-status-light scifi-green"></div>
+                </div>
+                <div class="scifi-engine-grid">
+                  <div class="scifi-engine-readout">
+                    <span class="scifi-label">RPM</span>
+                    <span class="scifi-value"><span id="scifi_rpm">--</span>%</span>
+                    <div class="scifi-circular-progress" id="scifi_rpm_circle"></div>
+                  </div>
+                  <div class="scifi-engine-readout">
+                    <span class="scifi-label">FUEL FLOW</span>
+                    <span class="scifi-value"><span id="scifi_fuel">--.-</span> GPH</span>
+                    <div class="scifi-fuel-indicator" id="scifi_fuel_indicator"></div>
+                  </div>
+                </div>
+              </div>
+              
+              <!-- Attitude Indicator -->
+              <div class="scifi-panel scifi-attitude-panel">
+                <div class="scifi-header">
+                  <div class="scifi-title">ATTITUDE</div>
+                  <div class="scifi-status-light scifi-blue"></div>
+                </div>
+                <div class="scifi-attitude-display">
+                  <div class="scifi-horizon" id="scifi_horizon">
+                    <div class="scifi-aircraft-symbol"></div>
+                    <div class="scifi-pitch-ladder"></div>
+                  </div>
+                  <div class="scifi-attitude-values">
+                    <div class="scifi-pitch-value">PITCH: <span id="scifi_pitch">-</span>°</div>
+                    <div class="scifi-roll-value">ROLL: <span id="scifi_roll">-</span>°</div>
+                  </div>
+                </div>
+              </div>
+              
+              <!-- Corner Elements -->
+              <div class="scifi-corner scifi-corner-tl"></div>
+              <div class="scifi-corner scifi-corner-tr"></div>
+              <div class="scifi-corner scifi-corner-bl"></div>
+              <div class="scifi-corner scifi-corner-br"></div>
+              
+              <!-- Scanning Lines -->
+              <div class="scifi-scan-line scifi-scan-horizontal"></div>
+              <div class="scifi-scan-line scifi-scan-vertical"></div>
+              
             </div>
           </div>
         </div>
@@ -3562,7 +3923,7 @@ INDEX_HTML = """
             if (trail) {
               trail.push(pos);
               // Keep only last 500 points for performance
-              if (trail.length > 500) {
+              if (trail.length > 1000) {
                 trail.shift();
               }
             }
@@ -3710,6 +4071,12 @@ INDEX_HTML = """
       const lvHdg = document.getElementById('lv_hdg');
       const lvPitch = document.getElementById('lv_pitch');
       const lvRoll = document.getElementById('lv_roll');
+      const lvRpm = document.getElementById('lv_rpm');
+      const lvFuelFlow = document.getElementById('lv_fuel_flow');
+      // Aircraft info card elements
+      const aircraftInfoTile = document.getElementById('aircraft_info_tile');
+      const lvCallsign = document.getElementById('lv_callsign');
+      const lvAircraftModel = document.getElementById('lv_aircraft_model');
       let liveInfoTimer = null;
       let liveKnownPlayers = new Set();
       
@@ -3717,6 +4084,12 @@ INDEX_HTML = """
       let liveFollow2D = false;
       let liveFollow3D = false;
       let liveFollowCS = null;
+      
+      // Telemetry cycling functionality
+      let telemetryCyclingEnabled = false;
+      let telemetryCycleTimer = null;
+      let telemetryCurrentIndex = 0;
+      let telemetryCurrentCallsign = null;
 
       // Helper function for coordinate validation
       const isFiniteNum = (n) => typeof n === 'number' && Number.isFinite(n);
@@ -3977,9 +4350,15 @@ INDEX_HTML = """
       // Live map instance
       let liveMap2D = null;
       let liveMarkers = new Map(); // Legacy compatibility 
-      let livePaths = new Map();   
+      let livePaths = new Map();
+      let liveLastSamples = new Map(); // Track latest samples for each callsign   
       let liveHoverPaths = new Map();
       let liveTrackData = new Map();
+      // Caches to avoid unnecessary DOM churn (prevents flicker)
+      const lastTooltipKeyMap = new Map(); // cs -> tooltipKey
+      const lastIconKeyMap = new Map();    // cs -> heading/color key
+      const lastPopupKeyMap = new Map();   // cs -> popup content key
+      const pinnedDialogs = new Set();     // callsigns with pinned popup
       
       function ensureLiveMap() {
         if (liveMap2D) return Promise.resolve();
@@ -4189,6 +4568,481 @@ INDEX_HTML = """
         }
       }
       
+      // Debug info state and variables
+      let debugInfoActive = false;
+      const debugInfoData = {
+        viewers: 0,
+        feeders: 0,
+        players: 0,
+        connected: false,
+        channel: 'default',
+        wsLatency: 0,
+        lastUpdate: 0,
+        totalSamples: 0
+      };
+      
+      // Function to toggle colorblind mode and refresh all colors
+      function toggleColorblindMode() {
+        colorblindMode = !colorblindMode;
+        
+        // Save preference
+        try {
+          localStorage.setItem('ftpro_colorblind_mode', colorblindMode.toString());
+        } catch (e) {
+          console.warn('Failed to save colorblind mode preference:', e);
+        }
+        
+        // Clear existing color mappings to force regeneration with new palette
+        callsignColors.clear();
+        
+        // Refresh all existing track colors
+        refreshTrackColors();
+        
+        // Update toggle button
+        const toggleBtn = document.getElementById('colorblind_toggle');
+        if (toggleBtn) {
+          toggleBtn.textContent = colorblindMode ? 'Standard Colors' : 'High Contrast';
+          toggleBtn.classList.toggle('active', colorblindMode);
+          toggleBtn.title = colorblindMode ? 
+            'Switch to standard color palette' : 
+            'Switch to high contrast colors for better visibility';
+        }
+        
+        pushEvent(colorblindMode ? 'High contrast mode enabled' : 'High contrast mode disabled');
+      }
+      
+      // Function to refresh all track colors with current palette
+      function refreshTrackColors() {
+        // Clear tooltip cache to force regeneration with new colors
+        tooltipCache.clear();
+        
+        // Refresh 2D track colors
+        if (liveMap2D && liveMap2D.map && liveMap2D.paths && liveMap2D.markers) {
+          // Update track paths using the correct references
+          liveMap2D.paths.forEach((pathLine, callsign) => {
+            const newColor = getCallsignColor(callsign);
+            pathLine.setStyle({ color: newColor, weight: 3, opacity: 0.7 });
+          });
+          
+          // Update hover paths (invisible interaction layers)  
+          if (liveMap2D.hoverPaths) {
+            liveMap2D.hoverPaths.forEach((hoverLine, callsign) => {
+              // Hover paths remain transparent but need to be updated for consistency
+              hoverLine.setStyle({ color: 'transparent', weight: 15, opacity: 0 });
+            });
+          }
+          
+          // Update aircraft markers using the correct references
+          liveMap2D.markers.forEach((marker, callsign) => {
+            const newColor = getCallsignColor(callsign);
+            const icon = L.divIcon({
+              className: 'ac-icon',
+              html: `<div class="ac-rot" style="background: rgba(255,255,255,0.9); border: 2px solid ${newColor}; border-radius: 50%; padding: 4px; box-shadow: 0 2px 8px rgba(0,0,0,0.3);"><div style="width: 32px; height: 32px; background: ${newColor}; mask: url('/static/icons/airplane.svg') no-repeat center; -webkit-mask: url('/static/icons/airplane.svg') no-repeat center; mask-size: 24px 24px; -webkit-mask-size: 24px 24px;"></div></div>`,
+              iconSize: [40, 40],
+              iconAnchor: [20, 20]
+            });
+            marker.setIcon(icon);
+            
+            // Update tooltip content with new color
+            const sample = liveLastSamples.get(callsign);
+            if (sample) {
+              updateAircraftTooltip(marker, callsign, sample);
+            }
+          });
+        }
+        
+        // Fallback to legacy references if new ones don't exist
+        if (liveMarkers && liveMarkers.size > 0) {
+          liveMarkers.forEach((marker, callsign) => {
+            const newColor = getCallsignColor(callsign);
+            const icon = L.divIcon({
+              className: 'ac-icon',
+              html: `<div class="ac-rot" style="background: rgba(255,255,255,0.9); border: 2px solid ${newColor}; border-radius: 50%; padding: 4px; box-shadow: 0 2px 8px rgba(0,0,0,0.3);"><div style="width: 32px; height: 32px; background: ${newColor}; mask: url('/static/icons/airplane.svg') no-repeat center; -webkit-mask: url('/static/icons/airplane.svg') no-repeat center; mask-size: 24px 24px; -webkit-mask-size: 24px 24px;"></div></div>`,
+              iconSize: [40, 40],
+              iconAnchor: [20, 20]
+            });
+            marker.setIcon(icon);
+          });
+        }
+        
+        if (livePaths && livePaths.size > 0) {
+          livePaths.forEach((pathLine, callsign) => {
+            const newColor = getCallsignColor(callsign);
+            pathLine.setStyle({ color: newColor, weight: 3, opacity: 0.7 });
+          });
+        }
+        
+        // Refresh 3D colors if globe viewer is active
+        if (liveGlobe && liveGlobe.trails) {
+          liveGlobe.trails.forEach((trailEntity, callsign) => {
+            const newColor = getCallsignColor(callsign);
+            if (trailEntity.polyline) {
+              trailEntity.polyline.material = Cesium.Color.fromCssColorString(newColor);
+            }
+          });
+        }
+        
+        // Force a map refresh to ensure changes are visible
+        if (liveMap2D && liveMap2D.map) {
+          setTimeout(() => {
+            liveMap2D.map.invalidateSize();
+          }, 100);
+        }
+      }
+      
+      // Color picker functions for individual aircraft
+      window.toggleColorPicker = function(callsign) {
+        const picker = document.getElementById(`color-picker-${callsign}`);
+        if (picker) {
+          picker.style.display = picker.style.display === 'none' ? 'block' : 'none';
+        }
+      };
+      
+      // Follow aircraft from tooltip
+      window.followAircraft = function(callsign) {
+        liveFollowCS = callsign;
+        liveFollow2D = true;
+        updateFollowBtn();
+        pushEvent(`Following ${callsign}`);
+      };
+      
+      // Close tooltip manually
+      window.closeTooltip = function(callsign) {
+        const marker = liveMarkers.get(callsign);
+        if (marker && marker.isTooltipOpen()) {
+          marker.closeTooltip();
+        }
+      };
+      
+      window.setAircraftColor = function(callsign, color) {
+        // Set the custom color for this aircraft
+        callsignColors.set(callsign, color);
+        saveCallsignColors();
+        
+        // Update the color preview
+        const preview = document.getElementById(`color-preview-${callsign}`);
+        if (preview) {
+          preview.style.background = color;
+        }
+        
+        // Update the aircraft track and marker with new color
+        updateAircraftColor(callsign, color);
+        
+        // Hide the color picker
+        const picker = document.getElementById(`color-picker-${callsign}`);
+        if (picker) {
+          picker.style.display = 'none';
+        }
+        
+        pushEvent(`Changed ${callsign} track color to ${color}`);
+      };
+      
+      // Function to update a specific aircraft's color
+      function updateAircraftColor(callsign, color) {
+        // Update 2D track path
+        if (liveMap2D && liveMap2D.paths) {
+          const pathLine = liveMap2D.paths.get(callsign);
+          if (pathLine) {
+            pathLine.setStyle({ color: color, weight: 3, opacity: 0.7 });
+          }
+        }
+        
+        // Fallback to legacy paths
+        if (livePaths) {
+          const pathLine = livePaths.get(callsign);
+          if (pathLine) {
+            pathLine.setStyle({ color: color, weight: 3, opacity: 0.7 });
+          }
+        }
+        
+        // Update 2D marker
+        if (liveMap2D && liveMap2D.markers) {
+          const marker = liveMap2D.markers.get(callsign);
+          if (marker) {
+            const icon = L.divIcon({
+              className: 'ac-icon',
+              html: `<div class="ac-rot" style="background: rgba(255,255,255,0.9); border: 2px solid ${color}; border-radius: 50%; padding: 4px; box-shadow: 0 2px 8px rgba(0,0,0,0.3);"><div style="width: 32px; height: 32px; background: ${color}; mask: url('/static/icons/airplane.svg') no-repeat center; -webkit-mask: url('/static/icons/airplane.svg') no-repeat center; mask-size: 24px 24px; -webkit-mask-size: 24px 24px;"></div></div>`,
+              iconSize: [40, 40],
+              iconAnchor: [20, 20]
+            });
+            marker.setIcon(icon);
+          }
+        }
+        
+        // Fallback to legacy markers
+        if (liveMarkers) {
+          const marker = liveMarkers.get(callsign);
+          if (marker) {
+            const icon = L.divIcon({
+              className: 'ac-icon',
+              html: `<div class="ac-rot" style="background: rgba(255,255,255,0.9); border: 2px solid ${color}; border-radius: 50%; padding: 4px; box-shadow: 0 2px 8px rgba(0,0,0,0.3);"><div style="width: 32px; height: 32px; background: ${color}; mask: url('/static/icons/airplane.svg') no-repeat center; -webkit-mask: url('/static/icons/airplane.svg') no-repeat center; mask-size: 24px 24px; -webkit-mask-size: 24px 24px;"></div></div>`,
+              iconSize: [40, 40],
+              iconAnchor: [20, 20]
+            });
+            marker.setIcon(icon);
+          }
+        }
+        
+        // Update 3D colors if globe viewer is active
+        if (liveGlobe && liveGlobe.trails) {
+          const trailEntity = liveGlobe.trails.get(callsign);
+          if (trailEntity && trailEntity.polyline) {
+            trailEntity.polyline.material = Cesium.Color.fromCssColorString(color);
+          }
+        }
+      }
+      
+      // Multiplayer follow system
+      let activeAircraft = new Set(); // Track all active aircraft
+      
+      // Function to update the aircraft follow dropdown
+      function updateAircraftDropdown() {
+        const followDropdown = document.getElementById('live_follow_dropdown');
+        const followBtn = document.getElementById('live_follow');
+        
+        if (!followDropdown || !followBtn) return;
+        
+        if (activeAircraft.size > 1) {
+          // Show dropdown when multiple aircraft are active
+          followDropdown.style.display = 'block';
+          followBtn.textContent = liveFollowCS ? `Following ${liveFollowCS}` : 'Follow';
+          
+          // Update dropdown options
+          followDropdown.innerHTML = '<option value="">Select Aircraft</option>';
+          activeAircraft.forEach(callsign => {
+            const option = document.createElement('option');
+            option.value = callsign;
+            option.textContent = callsign;
+            option.selected = callsign === liveFollowCS;
+            followDropdown.appendChild(option);
+          });
+        } else if (activeAircraft.size === 1) {
+          // Hide dropdown when only one aircraft is active
+          followDropdown.style.display = 'none';
+          const singleCallsign = Array.from(activeAircraft)[0];
+          followBtn.textContent = liveFollowCS === singleCallsign ? `Following ${singleCallsign}` : 'Follow';
+        } else {
+          // No aircraft active
+          followDropdown.style.display = 'none';
+          followBtn.textContent = 'Follow';
+        }
+      }
+      
+      // Function to set followed aircraft
+      function setFollowedAircraft(callsign) {
+        if (callsign && activeAircraft.has(callsign)) {
+          liveFollowCS = callsign;
+          pushEvent(`Now following ${callsign}`);
+        } else {
+          liveFollowCS = null;
+          pushEvent('Stopped following aircraft');
+          // Telemetry will now be handled by callsign input or cycling mode
+        }
+        updateAircraftDropdown();
+      }
+      
+      // Function to add/update active aircraft
+      function updateActiveAircraft(callsign) {
+        const wasEmpty = activeAircraft.size === 0;
+        activeAircraft.add(callsign);
+        
+        // Auto-follow the first aircraft if none is currently followed
+        if (wasEmpty && !liveFollowCS) {
+          setFollowedAircraft(callsign);
+        }
+        
+        updateAircraftDropdown();
+      }
+      
+      // Function to remove inactive aircraft
+      function removeInactiveAircraft(callsign) {
+        activeAircraft.delete(callsign);
+        
+        // If we were following this aircraft, stop following or switch to another
+        if (liveFollowCS === callsign) {
+          if (activeAircraft.size > 0) {
+            // Switch to another active aircraft
+            const nextAircraft = Array.from(activeAircraft)[0];
+            setFollowedAircraft(nextAircraft);
+          } else {
+            // No aircraft left
+            setFollowedAircraft(null);
+          }
+        }
+        
+        updateAircraftDropdown();
+      }
+
+      // Function to update aircraft tooltip content
+      function updateAircraftTooltip(marker, callsign, sample) {
+        const currentColor = getCallsignColor(callsign);
+        const tooltipContent = `
+          <div class="aircraft-telemetry-tooltip">
+            <div class="aircraft-callsign">${callsign}</div>
+            <div class="telemetry-grid">
+              <div class="telem-tile">
+                <div class="telem-label">ALT</div>
+                <div class="telem-value">${sample.alt_m ? Math.round(sample.alt_m) : '-'}<span class="telem-unit">m</span></div>
+              </div>
+              <div class="telem-tile">
+                <div class="telem-label">SPD</div>
+                <div class="telem-value">${sample.spd_kt ? Math.round(sample.spd_kt) : '-'}<span class="telem-unit">kt</span></div>
+              </div>
+              <div class="telem-tile">
+                <div class="telem-label">HDG</div>
+                <div class="telem-value">${sample.hdg_deg ? Math.round(sample.hdg_deg) : '-'}<span class="telem-unit">°</span></div>
+              </div>
+              <div class="telem-tile">
+                <div class="telem-label">V/S</div>
+                <div class="telem-value">${sample.vsi_ms ? sample.vsi_ms.toFixed(1) : '-'}<span class="telem-unit">m/s</span></div>
+              </div>
+            </div>
+            <div class="color-picker-section" style="margin-top:12px; padding-top:12px; border-top:1px solid rgba(255,255,255,0.2);">
+              <div style="display:flex; align-items:center; gap:8px; margin-bottom:8px;">
+                <div style="font-size:12px; font-weight:500;">Track Color:</div>
+                <div id="color-preview-${callsign}" style="width:16px; height:16px; background:${currentColor}; border:1px solid rgba(255,255,255,0.5); border-radius:3px; cursor:pointer;" onclick="toggleColorPicker('${callsign}'); return false;"></div>
+              </div>
+              <div id="color-picker-${callsign}" style="display:none; margin-bottom:8px;">
+                <div style="display:grid; grid-template-columns:repeat(5,1fr); gap:4px;">
+                  ${(colorblindMode ? AIRCRAFT_COLORS_HIGH_CONTRAST : AIRCRAFT_COLORS).slice(0,10).map(color => 
+                    `<div style="width:20px; height:20px; background:${color}; border:1px solid rgba(255,255,255,0.5); cursor:pointer; border-radius:3px;" onclick="setAircraftColor('${callsign}', '${color}'); return false;"></div>`
+                  ).join('')}
+                </div>
+              </div>
+            </div>
+            <div class="tooltip-hint">Click aircraft to follow • Click color to change</div>
+          </div>
+        `;
+        
+        marker.setTooltipContent(tooltipContent);
+      }
+      
+      // Function to toggle debug info overlay
+      function toggleDebugInfo() {
+        debugInfoActive = !debugInfoActive;
+        
+        const overlay = document.getElementById('live_debug_overlay');
+        const toggleBtn = document.getElementById('live_debug_info');
+        
+        if (toggleBtn) {
+          toggleBtn.textContent = debugInfoActive ? 'Debug Info: ON' : 'Debug Info';
+          toggleBtn.classList.toggle('active', debugInfoActive);
+        }
+        
+        if (overlay) {
+          overlay.style.display = debugInfoActive ? 'block' : 'none';
+        }
+        
+        // Start/stop debug info updates
+        if (debugInfoActive) {
+          updateDebugInfo();
+        }
+        
+        pushEvent(debugInfoActive ? 'Debug info overlay enabled' : 'Debug info overlay disabled');
+      }
+      
+      // Function to update debug info display
+      function updateDebugInfo() {
+        if (!debugInfoActive) return;
+        
+        const overlay = document.getElementById('live_debug_overlay');
+        if (!overlay) return;
+        
+        // Gather current status information
+        const now = Date.now();
+        const timeSinceLastUpdate = debugInfoData.lastUpdate > 0 ? now - debugInfoData.lastUpdate : 0;
+        
+        // Count active aircraft
+        let activeAircraft = 0;
+        let totalTrackPoints = 0;
+        liveTrackData.forEach((track, callsign) => {
+          if (track && track.length > 0) {
+            activeAircraft++;
+            totalTrackPoints += track.length;
+          }
+        });
+        
+        const debugText = `Debug Information
+─────────────────
+Connection: ${debugInfoData.connected ? 'Connected' : 'Disconnected'}
+Channel: ${debugInfoData.channel}
+WS Latency: ${debugInfoData.wsLatency}ms
+Last Update: ${timeSinceLastUpdate < 5000 ? timeSinceLastUpdate + 'ms ago' : 'Stale'}
+
+Stats:
+─────
+Viewers: ${debugInfoData.viewers}
+Feeders: ${debugInfoData.feeders} 
+Active Aircraft: ${activeAircraft}
+Total Track Points: ${totalTrackPoints}
+Samples Received: ${debugInfoData.totalSamples}
+
+Colors: ${colorblindMode ? 'High Contrast' : 'Standard'}
+Map Engine: ${typeof Cesium !== 'undefined' ? '2D+3D' : '2D Only'}`;
+        
+        overlay.textContent = debugText;
+        
+        // Schedule next update if still active
+        if (debugInfoActive) {
+          setTimeout(updateDebugInfo, 1000);
+        }
+      }
+      
+      // Function to toggle telemetry cycling
+      function toggleTelemetryCycling() {
+        telemetryCyclingEnabled = !telemetryCyclingEnabled;
+        
+        const toggleBtn = document.getElementById('live_telemetry_cycle');
+        if (toggleBtn) {
+          toggleBtn.textContent = telemetryCyclingEnabled ? 'Telem Cycle: ON' : 'Telem Cycle';
+          toggleBtn.classList.toggle('active', telemetryCyclingEnabled);
+        }
+        
+        if (telemetryCyclingEnabled) {
+          startTelemetryCycling();
+          pushEvent('Telemetry cycling enabled (3s intervals)');
+        } else {
+          stopTelemetryCycling();
+          pushEvent('Telemetry cycling disabled');
+        }
+      }
+      
+      // Function to start telemetry cycling
+      function startTelemetryCycling() {
+        if (telemetryCycleTimer) {
+          clearInterval(telemetryCycleTimer);
+        }
+        
+        telemetryCurrentIndex = 0;
+        telemetryCycleTimer = setInterval(() => {
+          cycleTelemetryToNextAircraft();
+        }, 3000); // 3 second intervals
+      }
+      
+      // Function to stop telemetry cycling
+      function stopTelemetryCycling() {
+        if (telemetryCycleTimer) {
+          clearInterval(telemetryCycleTimer);
+          telemetryCycleTimer = null;
+        }
+        telemetryCurrentCallsign = null;
+      }
+      
+      // Function to cycle to next aircraft
+      function cycleTelemetryToNextAircraft() {
+        if (!telemetryCyclingEnabled || liveFollowCS) return; // Don't cycle if following
+        
+        const aircraftList = Array.from(activeAircraft);
+        if (aircraftList.length === 0) {
+          telemetryCurrentCallsign = null;
+          return;
+        }
+        
+        telemetryCurrentIndex = (telemetryCurrentIndex) % aircraftList.length;
+        telemetryCurrentCallsign = aircraftList[telemetryCurrentIndex];
+        telemetryCurrentIndex++;
+      }
+
       // Function to toggle debug mode for all aircraft
       function toggleDebugAxes() {
         debugAxes = !debugAxes;
@@ -4287,7 +5141,8 @@ INDEX_HTML = """
                     try {
                       const ll = m.getLatLng();
                       const targetZ = Math.max(12, liveMap2D.getZoom());
-                      liveMap2D.flyTo(ll, targetZ, { animate: true, duration: 0.6 });
+                      // Use smooth setView instead of flyTo to avoid animation conflicts
+                      liveMap2D.setView(ll, targetZ);
                     } catch(_) {}
                   }
                 } else if (live3DActive) {
@@ -4399,6 +5254,34 @@ INDEX_HTML = """
         '#D2691E'  // Chocolate
       ];
       
+      // High contrast color palette for color vision accessibility
+      // Carefully chosen colors that are distinguishable for protanopia/deuteranopia (red-green color blindness)
+      const AIRCRAFT_COLORS_HIGH_CONTRAST = [
+        '#000000', // Black
+        '#0173B2', // Blue  
+        '#DE8F05', // Orange
+        '#029E73', // Bluish Green
+        '#D55E00', // Vermilion
+        '#CC78BC', // Reddish Purple
+        '#CA9161', // Yellow Brown
+        '#949494', // Gray
+        '#5601A4', // Purple
+        '#7A68A6', // Light Purple
+        '#188FD4', // Light Blue
+        '#E24A33', // Red Orange
+        '#8EBA42', // Olive Green
+        '#FBC15E', // Yellow Orange
+        '#8C564B', // Brown
+        '#E377C2', // Pink
+        '#7F7F7F', // Medium Gray
+        '#BCBD22', // Olive
+        '#17BECF', // Cyan
+        '#FFFFFF'  // White
+      ];
+      
+      // Track color accessibility mode
+      let colorblindMode = true;
+      
       // Callsign to color mapping with persistence
       const callsignColors = new Map();
       
@@ -4444,9 +5327,10 @@ INDEX_HTML = """
           hash = hash & hash; // Convert to 32-bit integer
         }
         
-        // Select color from palette based on hash
-        const colorIndex = Math.abs(hash) % AIRCRAFT_COLORS.length;
-        const color = AIRCRAFT_COLORS[colorIndex];
+        // Select color from appropriate palette based on accessibility mode
+        const colorPalette = colorblindMode ? AIRCRAFT_COLORS_HIGH_CONTRAST : AIRCRAFT_COLORS;
+        const colorIndex = Math.abs(hash) % colorPalette.length;
+        const color = colorPalette[colorIndex];
         
         // Store mapping for consistency
         callsignColors.set(callsign, color);
@@ -4460,10 +5344,77 @@ INDEX_HTML = """
       function pushEvent(msg) {
         if (liveEventsEl) {
           const div = document.createElement('div');
+          div.className = 'note';
           div.textContent = `${new Date().toLocaleTimeString()}: ${msg}`;
-          liveEventsEl.appendChild(div);
-          liveEventsEl.scrollTop = liveEventsEl.scrollHeight;
+          liveEventsEl.prepend(div);
         }
+      }
+
+      // Tooltip helpers for live markers
+      function closeTooltip(callsign) {
+        try {
+          const marker = liveMarkers && liveMarkers.get(callsign);
+          if (marker && marker.closeTooltip) marker.closeTooltip();
+        } catch (_) {}
+      }
+
+      function toggleColorPicker(callsign) {
+        try {
+          const el = document.getElementById('color-picker-' + callsign);
+          if (!el) return;
+          el.style.display = (el.style.display === 'none' || !el.style.display) ? 'block' : 'none';
+        } catch(_) {}
+      }
+
+      function setAircraftColor(callsign, color) {
+        try {
+          if (!color) return;
+          callsignColors.set(callsign, color);
+          saveCallsignColors();
+          // Update 2D path color if exists
+          const pathLine = livePaths && livePaths.get(callsign);
+          if (pathLine && pathLine.setStyle) pathLine.setStyle({ color });
+          // Update marker icon on next frame via heading/color key change
+          pushEvent(`Color updated for ${callsign}`);
+        } catch (e) {
+          console.warn('Failed to set aircraft color', callsign, color, e);
+        }
+      }
+
+      // Update fields inside an already-open popup without re-rendering
+      function updatePopupLiveFields(callsign, sample) {
+        try {
+          const marker = liveMarkers && liveMarkers.get(callsign);
+          if (!marker || !marker.isPopupOpen || !marker.isPopupOpen()) return;
+          const popup = marker.getPopup && marker.getPopup();
+          if (!popup) return;
+          const el = popup.getElement && popup.getElement();
+          if (!el) return;
+          // Update telemetry numeric values by position: ALT, SPD, HDG, V/S
+          const values = el.querySelectorAll('.telemetry-grid .telem-tile .telem-value');
+          if (values && values.length >= 4) {
+            const setVal = (div, val) => {
+              if (!div) return;
+              // First child node is the text before the unit span
+              if (div.firstChild && div.firstChild.nodeType === Node.TEXT_NODE) {
+                div.firstChild.nodeValue = (val != null ? val : '-') + '';
+              } else {
+                // Fallback: rebuild minimal structure
+                const unit = div.querySelector('.telem-unit');
+                div.innerHTML = '';
+                div.appendChild(document.createTextNode(val != null ? (val + '') : '-'));
+                if (unit) div.appendChild(unit);
+              }
+            };
+            setVal(values[0], sample && sample.alt_m != null ? Math.round(sample.alt_m) : '-');
+            setVal(values[1], sample && sample.spd_kt != null ? Math.round(sample.spd_kt) : '-');
+            setVal(values[2], sample && sample.hdg_deg != null ? Math.round(sample.hdg_deg) : '-');
+            setVal(values[3], sample && sample.vsi_ms != null ? Number(sample.vsi_ms).toFixed(1) : '-');
+          }
+          // Update color preview swatch
+          const preview = el.querySelector('[data-action="color-preview"][data-callsign="' + callsign + '"]');
+          if (preview) preview.style.background = getCallsignColor(callsign);
+        } catch (_) {}
       }
 
       // WebSocket connection handling
@@ -4493,9 +5444,11 @@ INDEX_HTML = """
         liveWs.onopen = () => {
           liveConnected = true;
           liveStatus.textContent = 'connected';
+          debugInfoData.connected = true;
+          debugInfoData.channel = channel;
           pushEvent('Connected to live channel');
           
-          // Load persisted track data first
+          // Load persisted track data first (if enabled)
           loadTrackData(channel);
           
           // Fetch initial data and history
@@ -4521,6 +5474,7 @@ INDEX_HTML = """
         liveWs.onclose = () => {
           liveConnected = false;
           liveStatus.textContent = 'disconnected';
+          debugInfoData.connected = false;
           liveWs = null;
           currentChannel = null;  // Reset current channel on unexpected disconnect
           
@@ -4546,6 +5500,8 @@ INDEX_HTML = """
             const msg = JSON.parse(ev.data);
             if (msg.type === 'state' && msg.payload) {
               updateLivePosition(msg.payload);
+              debugInfoData.lastUpdate = Date.now();
+              debugInfoData.totalSamples++;
             }
           } catch (e) {
             console.error('Message parse error:', e);
@@ -4617,26 +5573,236 @@ INDEX_HTML = """
         clearMapData();
       }
 
-      // Track data persistence functions
-      function saveTrackData(channel) {
-        try {
-          const trackDataObj = {};
-          liveTrackData.forEach((data, callsign) => {
-            trackDataObj[callsign] = data;
+      // Track data persistence (IndexedDB-first, compact, quota-aware)
+      const MAX_STORED_POINTS_DEFAULT = 600; // ~30 min at 3s/save
+      let maxStoredPointsCurrent = MAX_STORED_POINTS_DEFAULT;
+      let trackPersistDisabled = false; // set true on quota errors
+      let persistEnabled = true;        // UI toggle
+      let trackDB = null;               // IDB instance cache
+
+      // UI: load toggle state on startup
+      try {
+        const persisted = localStorage.getItem('ftpro_persist_enabled');
+        if (persisted != null) persistEnabled = (persisted !== 'false');
+      } catch(_) {}
+      // Defer wiring the checkbox until DOM is ready (element exists below)
+
+      function buildCompactTrackSnapshot(limitPerCallsign) {
+        const out = { v: 1, c: {} }; // versioned compact format
+        liveTrackData.forEach((arr, cs) => {
+          if (!Array.isArray(arr) || arr.length === 0) return;
+          const start = Math.max(0, arr.length - limitPerCallsign);
+          const slice = arr.slice(start);
+          // Store only essential fields with short keys to save space
+          // [lat, lon, ts, alt, spd, hdg, vsi]
+          const compact = slice.map(p => [
+            p.pos && p.pos[0],
+            p.pos && p.pos[1],
+            p.timestamp,
+            p.data && p.data.alt_m,
+            p.data && p.data.spd_kt,
+            p.data && p.data.hdg_deg,
+            p.data && p.data.vsi_ms
+          ]);
+          out.c[cs] = compact;
+        });
+        return out;
+      }
+
+      function expandCompactTrackSnapshot(obj) {
+        if (!obj || typeof obj !== 'object') return null;
+        if (obj.v === 1 && obj.c && typeof obj.c === 'object') {
+          const result = new Map();
+          Object.entries(obj.c).forEach(([cs, list]) => {
+            if (!Array.isArray(list)) return;
+            const expanded = list
+              .filter(x => Array.isArray(x) && x.length >= 3)
+              .map(x => ({
+                pos: [x[0], x[1]],
+                data: {
+                  alt_m: x[3],
+                  spd_kt: x[4],
+                  hdg_deg: x[5],
+                  vsi_ms: x[6]
+                },
+                timestamp: x[2]
+              }));
+            result.set(cs, expanded);
           });
-          localStorage.setItem(`ftpro_tracks_${channel}`, JSON.stringify(trackDataObj));
+          return result;
+        }
+        return null;
+      }
+
+      function cleanupOldTrackKeysExcept(channel) {
+        try {
+          const prefix = 'ftpro_tracks_';
+          for (let i = 0; i < localStorage.length; i++) {
+            const k = localStorage.key(i);
+            if (k && k.startsWith(prefix) && k !== `${prefix}${channel}`) {
+              try { localStorage.removeItem(k); } catch(_) {}
+            }
+          }
+        } catch(_) {}
+      }
+
+      // Snackbar helper
+      function showSnackbar(msg, timeout = 3500) {
+        try {
+          const el = document.getElementById('live_snackbar');
+          if (!el) return;
+          el.textContent = msg;
+          el.style.display = 'block';
+          clearTimeout(el.__hideTimer);
+          el.__hideTimer = setTimeout(() => {
+            el.style.display = 'none';
+          }, timeout);
+        } catch(_) {}
+      }
+
+      // IndexedDB helpers
+      function openTrackDB() {
+        if (trackDB) return Promise.resolve(trackDB);
+        return new Promise((resolve, reject) => {
+          if (!('indexedDB' in window)) return resolve(null);
+          const req = indexedDB.open('ftpro', 1);
+          req.onupgradeneeded = (ev) => {
+            const db = ev.target.result;
+            if (!db.objectStoreNames.contains('track_snapshots')) {
+              db.createObjectStore('track_snapshots', { keyPath: 'channel' });
+            }
+          };
+          req.onsuccess = () => {
+            trackDB = req.result;
+            resolve(trackDB);
+          };
+          req.onerror = () => resolve(null); // fallback to localStorage
+        });
+      }
+
+      async function idbSaveTrackSnapshot(channel, snapshot) {
+        const db = await openTrackDB();
+        if (!db) throw new Error('IDB unavailable');
+        return new Promise((resolve, reject) => {
+          const tx = db.transaction('track_snapshots', 'readwrite');
+          const store = tx.objectStore('track_snapshots');
+          const payload = { channel, data: snapshot, updated: Date.now() };
+          const req = store.put(payload);
+          req.onsuccess = () => resolve();
+          req.onerror = (e) => reject(req.error || e);
+        });
+      }
+
+      async function idbLoadTrackSnapshot(channel) {
+        const db = await openTrackDB();
+        if (!db) return null;
+        return new Promise((resolve) => {
+          const tx = db.transaction('track_snapshots', 'readonly');
+          const store = tx.objectStore('track_snapshots');
+          const req = store.get(channel);
+          req.onsuccess = () => resolve((req.result && req.result.data) || null);
+          req.onerror = () => resolve(null);
+        });
+      }
+
+      async function idbDeleteOtherChannels(channel) {
+        const db = await openTrackDB();
+        if (!db) return;
+        return new Promise((resolve) => {
+          const tx = db.transaction('track_snapshots', 'readwrite');
+          const store = tx.objectStore('track_snapshots');
+          const req = store.getAllKeys();
+          req.onsuccess = () => {
+            const keys = req.result || [];
+            const ops = keys.filter(k => k !== channel).map(k => store.delete(k));
+            // Resolve after transaction completes
+            tx.oncomplete = () => resolve();
+            tx.onerror = () => resolve();
+          };
+          req.onerror = () => resolve();
+        });
+      }
+
+      async function saveTrackData(channel) {
+        if (trackPersistDisabled || !persistEnabled) return;
+        // Try IndexedDB first with adaptive trimming; fallback to localStorage
+        let limit = Math.max(50, maxStoredPointsCurrent);
+        let attempts = 0;
+        while (attempts < 5) {
+          const snapshot = buildCompactTrackSnapshot(limit);
+          try {
+            // IDB path
+            await idbSaveTrackSnapshot(channel, snapshot);
+            maxStoredPointsCurrent = Math.min(maxStoredPointsCurrent, limit);
+            return;
+          } catch (e) {
+            // Try to free IDB space by deleting other channels, then shrink
+            try { await idbDeleteOtherChannels(channel); } catch(_) {}
+            limit = Math.max(50, Math.floor(limit * 0.6));
+            attempts++;
+            if (attempts >= 3) break; // then try localStorage fallback
+          }
+        }
+        // Fallback to localStorage with further adaptive trimming
+        try {
+          attempts = 0;
+          while (attempts < 5) {
+            const snapshot = buildCompactTrackSnapshot(limit);
+            const json = JSON.stringify(snapshot);
+            try {
+              localStorage.setItem(`ftpro_tracks_${channel}`, json);
+              maxStoredPointsCurrent = Math.min(maxStoredPointsCurrent, limit);
+              return;
+            } catch (e) {
+              cleanupOldTrackKeysExcept(channel);
+              limit = Math.max(50, Math.floor(limit * 0.6));
+              attempts++;
+              if (attempts >= 5) throw e;
+            }
+          }
         } catch (e) {
           console.error('Failed to save track data:', e);
+          trackPersistDisabled = true;
+          persistEnabled = false;
+          try { localStorage.setItem('ftpro_persist_enabled', 'false'); } catch(_) {}
+          showSnackbar('Track persistence disabled: storage quota exceeded');
+          const cb = document.getElementById('persist_toggle');
+          if (cb) cb.checked = false;
         }
       }
 
-      function loadTrackData(channel) {
+      async function loadTrackData(channel) {
+        if (!persistEnabled) return;
+        try {
+          // Try IDB first
+          const idbData = await idbLoadTrackSnapshot(channel);
+          if (idbData) {
+            const expanded = expandCompactTrackSnapshot(idbData);
+            if (expanded) {
+              expanded.forEach((data, cs) => liveTrackData.set(cs, data));
+              return;
+            }
+          }
+        } catch (e) {
+          // ignore and fallback
+        }
         try {
           const saved = localStorage.getItem(`ftpro_tracks_${channel}`);
-          if (saved) {
-            const trackDataObj = JSON.parse(saved);
-            Object.entries(trackDataObj).forEach(([callsign, data]) => {
-              liveTrackData.set(callsign, data);
+          if (!saved) return;
+          let parsed = null;
+          try { parsed = JSON.parse(saved); } catch(_) {}
+          if (!parsed) return;
+          const expanded = expandCompactTrackSnapshot(parsed);
+          if (expanded) {
+            expanded.forEach((data, cs) => liveTrackData.set(cs, data));
+            return;
+          }
+          if (parsed && typeof parsed === 'object') {
+            Object.entries(parsed).forEach(([callsign, data]) => {
+              if (Array.isArray(data)) {
+                const start = Math.max(0, data.length - MAX_STORED_POINTS_DEFAULT);
+                liveTrackData.set(callsign, data.slice(start));
+              }
             });
           }
         } catch (e) {
@@ -4685,8 +5851,8 @@ INDEX_HTML = """
               ).sort((a, b) => a.timestamp - b.timestamp);
               
               // Keep only last 500 points
-              if (unique.length > 500) {
-                unique.splice(0, unique.length - 500);
+              if (unique.length > 1000) {
+                unique.splice(0, unique.length - 1000);
               }
               
               liveTrackData.set(callsign, unique);
@@ -5009,6 +6175,11 @@ INDEX_HTML = """
             liveMeta.textContent = `Viewers: ${data.counts.viewers} • Feeders: ${data.counts.feeders} • Players: ${data.counts.players}`;
           }
           
+          // Update debug info data
+          debugInfoData.viewers = data.counts.viewers;
+          debugInfoData.feeders = data.counts.feeders;
+          debugInfoData.players = data.counts.players;
+          
           updatePlayerChips(data.players.map(p => p.callsign));
         } catch (e) {
           console.error('Failed to fetch info:', e);
@@ -5035,7 +6206,8 @@ INDEX_HTML = """
               const marker = liveMarkers.get(cs);
               if (marker) {
                 const pos = marker.getLatLng();
-                liveMap2D.flyTo(pos, Math.max(12, liveMap2D.getZoom()));
+                // Use setView to avoid animation conflicts with following system
+                liveMap2D.setView(pos, Math.max(12, liveMap2D.getZoom()));
               }
             } else {
               liveFollow2D = false;
@@ -5114,14 +6286,67 @@ INDEX_HTML = """
           return;
         }
         
+        // Enhanced telemetry display logic
+        let shouldShowTelemetry = false;
+        let telemetryCallsign = null;
+        
+        if (liveFollowCS && liveFollowCS === cs) {
+          // Priority 1: Show telemetry for followed aircraft
+          shouldShowTelemetry = true;
+          telemetryCallsign = cs;
+        } else if (!liveFollowCS) {
+          // Priority 2: When not following, determine telemetry source
+          if (telemetryCyclingEnabled && telemetryCurrentCallsign === cs) {
+            // Cycling mode - show current cycling aircraft
+            shouldShowTelemetry = true;
+            telemetryCallsign = cs;
+          } else if (!telemetryCyclingEnabled) {
+            // Static mode - use callsign input or first aircraft
+            const preferredCallsign = liveCallsign?.value?.trim();
+            if (preferredCallsign && preferredCallsign === cs) {
+              // Show telemetry for preferred callsign from input
+              shouldShowTelemetry = true;
+              telemetryCallsign = cs;
+            } else if (!preferredCallsign && activeAircraft.size === 1 && activeAircraft.has(cs)) {
+              // Show telemetry for single aircraft if no preference
+              shouldShowTelemetry = true;
+              telemetryCallsign = cs;
+            }
+          }
+        }
+        
         // Update telemetry display
-        if (!liveFollowCS || liveFollowCS === cs) {
+        if (shouldShowTelemetry) {
+          // Show aircraft info card
+          if (aircraftInfoTile) aircraftInfoTile.style.display = 'block';
+          if (lvCallsign) lvCallsign.textContent = telemetryCallsign || '-';
+          if (lvAircraftModel) lvAircraftModel.textContent = sample.aircraft || 'Unknown Aircraft';
+          
+          // Basic flight data
           if (lvAlt) lvAlt.textContent = sample.alt_m ? Math.round(sample.alt_m) : '-';
           if (lvSpd) lvSpd.textContent = sample.spd_kt ? Math.round(sample.spd_kt) : '-';
           if (lvVsi) lvVsi.textContent = sample.vsi_ms ? sample.vsi_ms.toFixed(1) : '-';
           if (lvHdg) lvHdg.textContent = sample.hdg_deg ? Math.round(sample.hdg_deg) : '-';
           if (lvPitch) lvPitch.textContent = sample.pitch_deg ? Math.round(sample.pitch_deg) : '-';
           if (lvRoll) lvRoll.textContent = sample.roll_deg ? Math.round(sample.roll_deg) : '-';
+          
+          // Engine data
+          if (lvRpm) lvRpm.textContent = sample.rpm_pct ? Math.round(sample.rpm_pct) : '-';
+          if (lvFuelFlow) lvFuelFlow.textContent = sample.fuel_flow_gph ? sample.fuel_flow_gph.toFixed(1) : '-';
+          
+          // Update Sci-Fi HUD if active
+          updateScifiHud(sample, telemetryCallsign);
+        } else if (!liveFollowCS && (!telemetryCyclingEnabled || !telemetryCurrentCallsign)) {
+          // Clear telemetry when no aircraft is being tracked
+          if (aircraftInfoTile) aircraftInfoTile.style.display = 'none';
+          if (lvAlt) lvAlt.textContent = '-';
+          if (lvSpd) lvSpd.textContent = '-';
+          if (lvVsi) lvVsi.textContent = '-';
+          if (lvHdg) lvHdg.textContent = '-';
+          if (lvPitch) lvPitch.textContent = '-';
+          if (lvRoll) lvRoll.textContent = '-';
+          if (lvRpm) lvRpm.textContent = '-';
+          if (lvFuelFlow) lvFuelFlow.textContent = '-';
         }
         
         // Direct position updates without interpolation
@@ -5132,11 +6357,71 @@ INDEX_HTML = """
           updateLive3DPosition(sample);
         }
         
-        // Handle 2D following
+        // Handle 2D following with smooth movement
         if (liveFollowCS === cs && liveFollow2D) {
           try {
-            const targetZoom = Math.max(12, liveMap2D.getZoom());
-            liveMap2D.flyTo(pos, targetZoom, { animate: true, duration: 0.3 });
+            // Store last follow position and time for smooth interpolation
+            if (!window.lastFollowPos) window.lastFollowPos = {};
+            if (!window.lastFollowTime) window.lastFollowTime = {};
+            if (!window.followAnimationRunning) window.followAnimationRunning = {};
+            
+            const lastPos = window.lastFollowPos[cs];
+            const lastTime = window.lastFollowTime[cs] || 0;
+            const currentTime = Date.now();
+            
+            // Calculate distance moved since last update
+            let shouldUpdate = true;
+            if (lastPos) {
+              const distanceMoved = liveMap2D.map.distance(lastPos, pos);
+              const timeSinceUpdate = currentTime - lastTime;
+              
+              // Only update if moved significantly or enough time has passed
+              // This prevents micro-movements from causing stuttering
+              const minDistance = 8; // meters (increased from 5)
+              const maxUpdateInterval = 800; // ms (reduced from 1000)
+              
+              shouldUpdate = distanceMoved > minDistance || timeSinceUpdate > maxUpdateInterval;
+            }
+            
+            // Don't start new animation if one is already running
+            const isAnimating = window.followAnimationRunning[cs] || false;
+            
+            if (shouldUpdate && !isAnimating) {
+              const currentZoom = liveMap2D.getZoom();
+              const targetZoom = Math.max(12, currentZoom);
+              
+              // Use smooth pan without constant animation conflicts
+              if (lastPos) {
+                // Mark animation as running to prevent conflicts
+                window.followAnimationRunning[cs] = true;
+                
+                // Smooth pan to new position with optimized settings
+                liveMap2D.map.panTo(pos, {
+                  animate: true,
+                  duration: 0.6,
+                  easeLinearity: 0.15,
+                  noMoveStart: true
+                });
+                
+                // Clear animation flag after duration
+                setTimeout(() => {
+                  window.followAnimationRunning[cs] = false;
+                }, 600);
+                
+                // Adjust zoom if needed, but less frequently
+                if (Math.abs(currentZoom - targetZoom) > 1) {
+                  setTimeout(() => {
+                    liveMap2D.map.setZoom(targetZoom);
+                  }, 100);
+                }
+              } else {
+                // First time following - immediate position
+                liveMap2D.setView(pos, targetZoom);
+              }
+              
+              window.lastFollowPos[cs] = pos;
+              window.lastFollowTime[cs] = currentTime;
+            }
           } catch(e) {
             console.error('Follow error:', e);
           }
@@ -5149,6 +6434,13 @@ INDEX_HTML = """
       // Wrap the detailed 2D rendering logic in a function that accepts the
       // current callsign, position and optional full sample for rich tooltips.
       function renderActual2DPosition(cs, pos, sample) {
+        // Store the latest sample for this callsign
+        if (sample) {
+          liveLastSamples.set(cs, sample);
+          // Update active aircraft tracking
+          updateActiveAircraft(cs);
+        }
+        
         // Ensure live map is initialized
         if (!liveMap2D || !liveMap2D.map) {
           ensureLiveMap().then(() => renderActual2DPosition(cs, pos, sample));
@@ -5190,6 +6482,7 @@ INDEX_HTML = """
         let tooltipContent = tooltipCache.get(tooltipKey);
         
         if (!tooltipContent) {
+          const currentColor = getCallsignColor(cs);
           tooltipContent = `
             <div class="aircraft-telemetry-tooltip">
               <div class="aircraft-callsign">${cs}</div>
@@ -5211,7 +6504,23 @@ INDEX_HTML = """
                   <div class="telem-value">${sample.vsi_ms ? sample.vsi_ms.toFixed(1) : '-'}<span class="telem-unit">m/s</span></div>
                 </div>
               </div>
-              <div class="tooltip-hint">Click to follow</div>
+              <div class="color-picker-section" style="margin-top:12px; padding-top:12px; border-top:1px solid rgba(255,255,255,0.2);">
+                <div style="display:flex; align-items:center; gap:8px; margin-bottom:8px;">
+                  <div style="font-size:12px; font-weight:500;">Track Color:</div>
+                  <div data-action="color-preview" data-callsign="${cs}" style="width:16px; height:16px; background:${currentColor}; border:1px solid rgba(255,255,255,0.5); border-radius:3px; cursor:pointer;"></div>
+                </div>
+                <div id="color-picker-${cs}" style="display:none; margin-bottom:8px;">
+                  <div style="display:grid; grid-template-columns:repeat(5,1fr); gap:4px;">
+                    ${(colorblindMode ? AIRCRAFT_COLORS_HIGH_CONTRAST : AIRCRAFT_COLORS).slice(0,10).map(color => 
+                      `<div data-action="color-select" data-callsign="${cs}" data-color="${color}" style="width:20px; height:20px; background:${color}; border:1px solid rgba(255,255,255,0.5); cursor:pointer; border-radius:3px;"></div>`
+                    ).join('')}
+                  </div>
+                </div>
+              </div>
+              <div style="margin-top:12px; padding-top:12px; border-top:1px solid rgba(255,255,255,0.2); display:flex; gap:8px; align-items:center;">
+                <button data-action="follow" data-callsign="${cs}" style="flex:1; padding:8px 12px; background:rgba(0,123,255,0.8); color:white; border:none; border-radius:4px; cursor:pointer; font-size:12px; font-weight:500;" onmouseover="this.style.background='rgba(0,123,255,1)'" onmouseout="this.style.background='rgba(0,123,255,0.8)'">Follow</button>
+                <button data-action="close" data-callsign="${cs}" style="padding:8px 12px; background:rgba(255,255,255,0.1); color:white; border:1px solid rgba(255,255,255,0.3); border-radius:4px; cursor:pointer; font-size:12px;" onmouseover="this.style.background='rgba(255,255,255,0.2)'" onmouseout="this.style.background='rgba(255,255,255,0.1)'">Close</button>
+              </div>
             </div>
           `;
           // Keep cache size reasonable
@@ -5225,21 +6534,82 @@ INDEX_HTML = """
         // Update 2D marker - optimized for performance
         if (!liveMarkers.has(cs)) {
           const marker = L.marker(pos, { icon: icon }).addTo(liveMap2D.map);
+          // Hover tooltip (non-interactive)
           marker.bindTooltip(tooltipContent, { 
             maxWidth: 320,
             className: 'aircraft-tooltip',
             direction: 'top',
-            offset: [0, -20]
+            offset: [0, -20],
+            interactive: false,
+            permanent: false,
+            sticky: false,
+            opacity: 1.0
+          }).off('mouseover').off('mouseout');
+          // Sticky popup dialog
+          marker.bindPopup(tooltipContent, {
+            maxWidth: 340,
+            className: 'aircraft-popup',
+            closeButton: true,
+            autoClose: true,
+            closeOnClick: true,
+            autoPan: true
           });
-          
-          // Add click handler for following
-          marker.on('click', () => {
-            liveFollowCS = cs;
-            liveFollow2D = true;
-            updateFollowBtn();
-            pushEvent(`Following ${cs} from marker`);
+          lastTooltipKeyMap.set(cs, tooltipKey);
+          lastIconKeyMap.set(cs, headingKey);
+          lastPopupKeyMap.set(cs, tooltipKey);
+
+          // Click marker to toggle sticky popup; close others automatically by autoClose
+          marker.on('click', (e) => {
+            try { e.originalEvent && e.originalEvent.stopPropagation && e.originalEvent.stopPropagation(); } catch(_) {}
+            if (pinnedDialogs.has(cs) && marker.isPopupOpen && marker.isPopupOpen()) {
+              try { marker.closePopup(); } catch(_) {}
+              pinnedDialogs.delete(cs);
+            } else {
+              pinnedDialogs.add(cs);
+              try { marker.setPopupContent(tooltipContent); } catch(_) {}
+              try { marker.openPopup(); } catch(_) {}
+            }
           });
-          
+
+          // Attach handlers to popup DOM when added
+          marker.getPopup().on('add', () => {
+            const el = marker.getPopup().getElement();
+            if (el && !el._hasListener) {
+              el._hasListener = true;
+              // Only prevent map interactions on non-interactive elements
+              ['click','mousedown','mouseup','dblclick','pointerdown','pointerup','touchstart','touchend'].forEach(evt => {
+                el.addEventListener(evt, ev => { 
+                  // Don't prevent events on buttons and interactive elements
+                  if (ev.target.closest('button, [data-action], input, select')) return;
+                  ev.stopPropagation(); 
+                }, true);
+              });
+              el.addEventListener('click', (ev) => {
+                const target = ev.target.closest('[data-action]');
+                if (!target) return;
+                // Only prevent default for map interaction, not for our buttons
+                ev.stopPropagation();
+                const action = target.getAttribute('data-action');
+                const callsign = target.getAttribute('data-callsign');
+                if (action === 'follow') {
+                  followAircraft(callsign);
+                } else if (action === 'close') {
+                  const m = liveMarkers.get(callsign);
+                  if (m && m.closePopup) m.closePopup();
+                  pinnedDialogs.delete(callsign);
+                } else if (action === 'color-preview') {
+                  toggleColorPicker(callsign);
+                } else if (action === 'color-select') {
+                  const color = target.getAttribute('data-color');
+                  setAircraftColor(callsign, color);
+                }
+              });
+            }
+          });
+          marker.getPopup().on('remove', () => {
+            pinnedDialogs.delete(cs);
+          });
+
           liveMarkers.set(cs, marker);
           
           // Create beautiful flight path with hover functionality
@@ -5276,40 +6646,33 @@ INDEX_HTML = """
                 }
               });
               
-              // Create track point tooltip
-              const trackTooltipContent = `
-                <div class="aircraft-telemetry-tooltip">
-                  <div class="aircraft-callsign">${cs} - Track Point</div>
-                  <div class="telemetry-grid">
-                    <div class="telem-tile">
-                      <div class="telem-label">ALT</div>
-                      <div class="telem-value">${closestPoint.data.alt_m ? Math.round(closestPoint.data.alt_m) : '-'}<span class="telem-unit">m</span></div>
-                    </div>
-                    <div class="telem-tile">
-                      <div class="telem-label">SPD</div>
-                      <div class="telem-value">${closestPoint.data.spd_kt ? Math.round(closestPoint.data.spd_kt) : '-'}<span class="telem-unit">kt</span></div>
-                    </div>
-                    <div class="telem-tile">
-                      <div class="telem-label">HDG</div>
-                      <div class="telem-value">${closestPoint.data.hdg_deg ? Math.round(closestPoint.data.hdg_deg) : '-'}<span class="telem-unit">°</span></div>
-                    </div>
-                    <div class="telem-tile">
-                      <div class="telem-label">V/S</div>
-                      <div class="telem-value">${closestPoint.data.vsi_ms ? closestPoint.data.vsi_ms.toFixed(1) : '-'}<span class="telem-unit">m/s</span></div>
-                    </div>
-                  </div>
-                  <div class="tooltip-hint">Time: ${new Date(closestPoint.timestamp).toLocaleTimeString()}</div>
-                </div>
-              `;
-              
-              // Show tooltip at the closest track point position for better snapping
-              hoverLine.bindTooltip(trackTooltipContent, {
-                maxWidth: 320,
-                className: 'aircraft-tooltip',
-                direction: 'top',
-                offset: [0, -10],
-                sticky: false
-              }).openTooltip(closestPoint.pos);
+              // Build content without template literals (SES-safe)
+              const trackTooltipContent = '<div class="aircraft-telemetry-tooltip">'
+                + '<div class="aircraft-callsign">' + cs + ' - Track Point</div>'
+                + '<div class="telemetry-grid">'
+                  + '<div class="telem-tile"><div class="telem-label">ALT</div><div class="telem-value">' + (closestPoint.data.alt_m ? Math.round(closestPoint.data.alt_m) : '-') + '<span class="telem-unit">m</span></div></div>'
+                  + '<div class="telem-tile"><div class="telem-label">SPD</div><div class="telem-value">' + (closestPoint.data.spd_kt ? Math.round(closestPoint.data.spd_kt) : '-') + '<span class="telem-unit">kt</span></div></div>'
+                  + '<div class="telem-tile"><div class="telem-label">HDG</div><div class="telem-value">' + (closestPoint.data.hdg_deg ? Math.round(closestPoint.data.hdg_deg) : '-') + '<span class="telem-unit">°</span></div></div>'
+                  + '<div class="telem-tile"><div class="telem-label">V/S</div><div class="telem-value">' + (closestPoint.data.vsi_ms ? closestPoint.data.vsi_ms.toFixed(1) : '-') + '<span class="telem-unit">m/s</span></div></div>'
+                + '</div>'
+                + '<div class="tooltip-hint">Time: ' + new Date(closestPoint.timestamp).toLocaleTimeString() + '</div>'
+              + '</div>';
+
+              // Reuse a single tooltip instance to avoid flicker
+              if (!hoverLine.getTooltip()) {
+                hoverLine.bindTooltip(trackTooltipContent, {
+                  maxWidth: 320,
+                  className: 'aircraft-tooltip',
+                  direction: 'top',
+                  offset: [0, -10],
+                  sticky: false,
+                  interactive: false
+                });
+              } else {
+                try { hoverLine.getTooltip().setContent(trackTooltipContent); } catch(_) {}
+              }
+              try { hoverLine.getTooltip().setLatLng(closestPoint.pos); } catch(_) {}
+              try { hoverLine.openTooltip(closestPoint.pos); } catch(_) {}
             }
           }
           
@@ -5325,14 +6688,15 @@ INDEX_HTML = """
           
           hoverLine.on('mouseout', function(e) {
             pathLine.setStyle({ weight: 3, opacity: 0.7 });
-            this.closeTooltip();
+            try { this.closeTooltip(); } catch(_) {}
           });
           
           hoverLine.on('click', function(e) {
             liveFollowCS = cs;
             liveFollow2D = true;
             updateFollowBtn();
-            liveMap2D.flyTo(e.latlng, Math.max(12, liveMap2D.getZoom()));
+            // Use setView to avoid animation conflicts with following system  
+            liveMap2D.setView(e.latlng, Math.max(12, liveMap2D.getZoom()));
             pushEvent(`Following ${cs} from track`);
           });
           
@@ -5349,8 +6713,20 @@ INDEX_HTML = """
           // Update existing marker
           const marker = liveMarkers.get(cs);
           marker.setLatLng(pos);
-          marker.setIcon(icon);
-          marker.setTooltipContent(tooltipContent);
+          const lastIconKey = lastIconKeyMap.get(cs);
+          if (lastIconKey !== headingKey) {
+            marker.setIcon(icon);
+            lastIconKeyMap.set(cs, headingKey);
+          }
+          const lastTk = lastTooltipKeyMap.get(cs);
+          if (lastTk !== tooltipKey) {
+            try { marker.setTooltipContent(tooltipContent); } catch(_) {}
+            lastTooltipKeyMap.set(cs, tooltipKey);
+          }
+          // If a popup is open (pinned), update only the live fields, not the whole content
+          if (pinnedDialogs.has(cs) && marker.isPopupOpen && marker.isPopupOpen()) {
+            updatePopupLiveFields(cs, sample);
+          }
           
           // Update flight path and track data
           const pathLine = livePaths.get(cs);
@@ -5392,9 +6768,9 @@ INDEX_HTML = """
                     timestamp: now
                   });
                   
-                  // Keep only last 500 points for performance
-                  if (currentPath.length > 500) currentPath.shift();
-                  if (trackData.length > 500) trackData.shift();
+                  // Keep only last ~1000 points for performance and storage
+                  if (currentPath.length > 1000) currentPath.shift();
+                  if (trackData.length > 1000) trackData.shift();
                   
                   pathLine.setLatLngs(currentPath);
                   liveTrackData.set(cs, trackData);
@@ -5412,7 +6788,9 @@ INDEX_HTML = """
           }
         }
         
-        // Active following logic - continuous tracking
+        // Active following logic - continuous tracking (DISABLED - replaced with smooth following above)
+        // This was causing stuttering by conflicting with the smooth following system
+        /*
         if (liveFollow2D && (liveFollowCS === null || liveFollowCS === cs)) {
           liveFollowCS = cs;
           try {
@@ -5423,6 +6801,7 @@ INDEX_HTML = """
             console.error('Follow error:', e);
           }
         }
+        */
         
         // Update 3D if available
         if (liveGlobeViewer) {
@@ -5533,7 +6912,10 @@ INDEX_HTML = """
               permanent: false,
               direction: 'top',
               offset: [0, -10],
-              className: 'aircraft-tooltip'
+              className: 'aircraft-tooltip',
+              interactive: true,
+              sticky: true,
+              opacity: 1.0
             });
           
           liveMarkers.set(cs, marker);
@@ -5559,8 +6941,8 @@ INDEX_HTML = """
           const currentPath = pathLine.getLatLngs();
           currentPath.push(pos);
           
-          // Keep only last 500 points for performance
-          if (currentPath.length > 500) {
+          // Keep only last ~1000 points for performance
+          if (currentPath.length > 1000) {
             currentPath.shift();
           }
           
@@ -5636,7 +7018,7 @@ INDEX_HTML = """
           if (trackData) {
             trackData.push({position: pos, timestamp: now});
             // Keep only last 500 points for performance
-            if (trackData.length > 500) {
+            if (trackData.length > 1000) {
               trackData.shift();
             }
           }
@@ -5732,28 +7114,6 @@ INDEX_HTML = """
       }
 
       // Channel management functions
-      function getCallsignColor(callsign) {
-        if (callsignColors.has(callsign)) {
-          return callsignColors.get(callsign);
-        }
-        
-        // Simple hash function for deterministic color selection
-        let hash = 0;
-        for (let i = 0; i < callsign.length; i++) {
-          const char = callsign.charCodeAt(i);
-          hash = ((hash << 5) - hash) + char;
-          hash = hash & hash; // Convert to 32bit integer
-        }
-        
-        // Map hash to color palette
-        const colors = ['#FF6B6B', '#4ECDC4', '#45B7D1', '#96CEB4', '#FECA57', '#FF9FF3', '#54A0FF', '#5F27CD'];
-        const colorIndex = Math.abs(hash) % colors.length;
-        const color = colors[colorIndex];
-        
-        callsignColors.set(callsign, color);
-        saveCallsignColors();
-        return color;
-      }
 
       // Recent channel management
       function getRecentChannels() {
@@ -5799,9 +7159,165 @@ INDEX_HTML = """
         });
       }
 
-      const liveDebug3DBtn = document.getElementById('live_debug3d');
-      if (liveDebug3DBtn) {
-        liveDebug3DBtn.addEventListener('click', toggleDebugAxes);
+      const liveDebugInfoBtn = document.getElementById('live_debug_info');
+      if (liveDebugInfoBtn) {
+        liveDebugInfoBtn.addEventListener('click', toggleDebugInfo);
+      }
+      
+      const liveTelemetryCycleBtn = document.getElementById('live_telemetry_cycle');
+      if (liveTelemetryCycleBtn) {
+        liveTelemetryCycleBtn.addEventListener('click', toggleTelemetryCycling);
+      }
+
+      // Sci-Fi HUD Toggle
+      let scifiHudActive = false;
+      const liveScifiToggleBtn = document.getElementById('live_scifi_toggle');
+      const liveHud = document.getElementById('live_hud');
+      const liveScifiHud = document.getElementById('live_scifi_hud');
+      
+      function toggleScifiHud() {
+        scifiHudActive = !scifiHudActive;
+        
+        if (scifiHudActive) {
+          if (liveHud) liveHud.style.display = 'none';
+          if (liveScifiHud) liveScifiHud.style.display = 'block';
+          if (liveScifiToggleBtn) {
+            liveScifiToggleBtn.textContent = 'Classic HUD';
+            liveScifiToggleBtn.classList.add('active');
+          }
+        } else {
+          if (liveHud) liveHud.style.display = 'flex';
+          if (liveScifiHud) liveScifiHud.style.display = 'none';
+          if (liveScifiToggleBtn) {
+            liveScifiToggleBtn.textContent = 'Sci-Fi HUD';
+            liveScifiToggleBtn.classList.remove('active');
+          }
+        }
+      }
+      
+      if (liveScifiToggleBtn) {
+        liveScifiToggleBtn.addEventListener('click', toggleScifiHud);
+      }
+
+      // Sci-Fi HUD Update Function
+      function updateScifiHud(sample, callsign) {
+        if (!scifiHudActive) return;
+        
+        // Get sci-fi elements
+        const scifiAircraftPanel = document.getElementById('scifi_aircraft_panel');
+        const scifiCallsign = document.getElementById('scifi_callsign');
+        const scifiAircraftModel = document.getElementById('scifi_aircraft_model');
+        const scifiAlt = document.getElementById('scifi_alt');
+        const scifiSpd = document.getElementById('scifi_spd');
+        const scifiVsi = document.getElementById('scifi_vsi');
+        const scifiHdg = document.getElementById('scifi_hdg');
+        const scifiPitch = document.getElementById('scifi_pitch');
+        const scifiRoll = document.getElementById('scifi_roll');
+        const scifiRpm = document.getElementById('scifi_rpm');
+        const scifiFuel = document.getElementById('scifi_fuel');
+        
+        // Update aircraft info
+        if (scifiAircraftPanel) scifiAircraftPanel.style.display = 'block';
+        if (scifiCallsign) scifiCallsign.textContent = callsign || 'N/A';
+        if (scifiAircraftModel) scifiAircraftModel.textContent = sample.aircraft || 'Unknown Aircraft';
+        
+        // Update flight data
+        if (scifiAlt) scifiAlt.textContent = sample.alt_m ? Math.round(sample.alt_m).toString().padStart(4, '0') : '----';
+        if (scifiSpd) scifiSpd.textContent = sample.spd_kt ? Math.round(sample.spd_kt).toString().padStart(3, '0') : '---';
+        if (scifiVsi) scifiVsi.textContent = sample.vsi_ms ? sample.vsi_ms.toFixed(1) : '--.-';
+        if (scifiHdg) scifiHdg.textContent = sample.hdg_deg ? Math.round(sample.hdg_deg).toString().padStart(3, '0') : '---';
+        if (scifiPitch) scifiPitch.textContent = sample.pitch_deg ? Math.round(sample.pitch_deg) : '-';
+        if (scifiRoll) scifiRoll.textContent = sample.roll_deg ? Math.round(sample.roll_deg) : '-';
+        
+        // Update engine data
+        if (scifiRpm) scifiRpm.textContent = sample.rpm_pct ? Math.round(sample.rpm_pct).toString().padStart(2, '0') : '--';
+        if (scifiFuel) scifiFuel.textContent = sample.fuel_flow_gph ? sample.fuel_flow_gph.toFixed(1) : '--.-';
+        
+        // Update progress bars
+        updateScifiProgressBars(sample);
+      }
+
+      function updateScifiProgressBars(sample) {
+        // Altitude bar (0-10000m range)
+        const altBar = document.getElementById('scifi_alt_bar');
+        if (altBar && sample.alt_m) {
+          const altPercent = Math.min(100, (sample.alt_m / 10000) * 100);
+          altBar.style.width = altPercent + '%';
+        }
+        
+        // Speed bar (0-500kt range)
+        const spdBar = document.getElementById('scifi_spd_bar');
+        if (spdBar && sample.spd_kt) {
+          const spdPercent = Math.min(100, (sample.spd_kt / 500) * 100);
+          spdBar.style.width = spdPercent + '%';
+        }
+        
+        // VSI bar (-20 to +20 m/s range)
+        const vsiBar = document.getElementById('scifi_vsi_bar');
+        if (vsiBar && sample.vsi_ms !== null && sample.vsi_ms !== undefined) {
+          const vsiPercent = Math.max(0, Math.min(100, ((sample.vsi_ms + 20) / 40) * 100));
+          vsiBar.style.width = vsiPercent + '%';
+          // Change color based on climb/descent
+          if (sample.vsi_ms > 0) {
+            vsiBar.style.background = 'linear-gradient(90deg, #00ff00, #80ff00)';
+          } else if (sample.vsi_ms < 0) {
+            vsiBar.style.background = 'linear-gradient(90deg, #ff4000, #ff8000)';
+          } else {
+            vsiBar.style.background = 'linear-gradient(90deg, #00ffff, #0080ff)';
+          }
+        }
+        
+        // RPM circular progress
+        const rpmCircle = document.querySelector('#scifi_rpm_circle::after');
+        if (sample.rpm_pct) {
+          const rpmRotation = (sample.rpm_pct / 100) * 360;
+          const rpmElement = document.getElementById('scifi_rpm_circle');
+          if (rpmElement) {
+            rpmElement.style.setProperty('--rpm-rotation', rpmRotation + 'deg');
+          }
+        }
+        
+        // Compass heading
+        const compass = document.querySelector('#scifi_compass::after');
+        if (sample.hdg_deg) {
+          const compassElement = document.getElementById('scifi_compass');
+          if (compassElement) {
+            compassElement.style.setProperty('--heading-rotation', sample.hdg_deg + 'deg');
+          }
+        }
+      }
+      
+      const colorblindToggleBtn = document.getElementById('colorblind_toggle');
+      if (colorblindToggleBtn) {
+        colorblindToggleBtn.addEventListener('click', toggleColorblindMode);
+      }
+      
+      // Setup follow button and dropdown event listeners
+      const liveFollowDropdown = document.getElementById('live_follow_dropdown');
+      
+      if (liveFollowBtn) {
+        liveFollowBtn.addEventListener('click', () => {
+          if (activeAircraft.size === 1) {
+            // Toggle follow for single aircraft
+            const singleCallsign = Array.from(activeAircraft)[0];
+            if (liveFollowCS === singleCallsign) {
+              setFollowedAircraft(null);
+            } else {
+              setFollowedAircraft(singleCallsign);
+            }
+          } else if (activeAircraft.size > 1) {
+            // With multiple aircraft, just toggle current selection
+            if (liveFollowCS) {
+              setFollowedAircraft(null);
+            }
+          }
+        });
+      }
+      
+      if (liveFollowDropdown) {
+        liveFollowDropdown.addEventListener('change', (e) => {
+          setFollowedAircraft(e.target.value || null);
+        });
       }
 
       // Auto-connect on page load
@@ -5809,12 +7325,51 @@ INDEX_HTML = """
         // Load persisted callsign colors
         loadCallsignColors();
         
+        // Load colorblind mode preference
+        try {
+          const stored = localStorage.getItem('ftpro_colorblind_mode');
+          if (stored === 'true') {
+            colorblindMode = true;
+            const toggleBtn = document.getElementById('colorblind_toggle');
+            if (toggleBtn) {
+              toggleBtn.textContent = 'Standard Colors';
+              toggleBtn.classList.add('active');
+              toggleBtn.title = 'Switch to standard color palette';
+            }
+          }
+        } catch (e) {
+          console.warn('Failed to load colorblind mode preference:', e);
+        }
+        
         setTimeout(() => {
           if (!liveConnected && liveChInput.value !== '') {
             ensureLiveMap().then(() => connectWs());
           }
         }, 1000);
-        
+
+        // Persistence toggle wiring
+        const persistToggle = document.getElementById('persist_toggle');
+        if (persistToggle) {
+          try {
+            // Initialize from saved state
+            const persisted = localStorage.getItem('ftpro_persist_enabled');
+            if (persisted != null) persistEnabled = (persisted !== 'false');
+          } catch(_) {}
+          persistToggle.checked = !!persistEnabled && !trackPersistDisabled;
+          persistToggle.addEventListener('change', (e) => {
+            persistEnabled = !!e.target.checked;
+            try { localStorage.setItem('ftpro_persist_enabled', persistEnabled ? 'true' : 'false'); } catch(_) {}
+            if (persistEnabled && trackPersistDisabled) {
+              // Re-enable after previous quota failure; will try again on next save
+              trackPersistDisabled = false;
+              showSnackbar('Track persistence re-enabled');
+            }
+            if (!persistEnabled) {
+              showSnackbar('Track persistence disabled');
+            }
+          });
+        }
+
         // Track mode toggle functionality
         document.querySelectorAll('input[name="track_mode"]').forEach(radio => {
           radio.addEventListener('change', function() {

@@ -193,17 +193,93 @@ class MSFSSource:
             return None
 
 
-def simulate_sample(t: float, origin_lat: float = 47.3769, origin_lon: float = 8.5417, origin_alt_m: float = 500.0):
-    import math
-    R = 0.02
-    ang = (t * 0.05) % (2 * math.pi)
+from math import sin, cos, radians, degrees, atan2, sqrt, pi
+import random, time as _time
+
+_SIM_ROUTES_GUI = {}
+
+def _hash_cs(cs: str) -> int:
+    h = 0
+    for ch in cs or 'ACFT':
+        h = (h * 131 + ord(ch)) & 0xFFFFFFFF
+    return h
+
+def _hav_m(a,b,c,d):
+    R=6371000.0
+    dlat=radians(c-a); dlon=radians(d-b)
+    x=sin(dlat/2)**2 + cos(radians(a))*cos(radians(c))*sin(dlon/2)**2
+    return 2*R*atan2(sqrt(x), sqrt(1-x))
+
+def _dest(a,b,brg,dist):
+    R=6371000.0; br=radians(brg); lat1=radians(a); lon1=radians(b); dr=dist/R
+    sinLat = sin(lat1)*cos(dr) + cos(lat1)*sin(dr)*cos(br)
+    lat2 = atan2(sinLat, sqrt(max(0.0,1.0 - sinLat*sinLat)))
+    lon2 = lon1 + atan2(sin(br)*sin(dr)*cos(lat1), cos(dr) - sin(lat1)*sin(lat2))
+    return degrees(lat2), (degrees(lon2)+540)%360-180
+
+def _brg(a,b,c,d):
+    y = sin(radians(d-b))*cos(radians(c))
+    x = cos(radians(a))*sin(radians(c)) - sin(radians(a))*cos(radians(c))*cos(radians(d-b))
+    return (degrees(atan2(y,x))+360)%360
+
+def _route(cs, olat, olon):
+    rnd = random.Random(_hash_cs(cs))
+    n = rnd.randint(5,9)
+    wps=[]; bearing=rnd.uniform(0,360)
+    for _ in range(n):
+        bearing=(bearing + rnd.uniform(25,90))%360
+        dist_km=rnd.uniform(6,25)
+        wps.append(_dest(olat, olon, bearing, dist_km*1000))
+    wps.append(wps[0])
+    speeds=[rnd.uniform(80,140) for _ in range(len(wps)-1)]
+    segs=[]; t0=0.0
+    for i in range(len(wps)-1):
+        a=wps[i]; b=wps[i+1]; d=_hav_m(a[0],a[1],b[0],b[1])
+        dur=max(30.0, d/ max(30.0, speeds[i]*0.514444))
+        segs.append(dict(a=a,b=b,d=d,spd_kt=speeds[i],dur=dur,t0=t0,t1=t0+dur))
+        t0+=dur
+    return dict(wps=wps,segs=segs,loop=t0,seed=rnd.random(),start=_time.time())
+
+def _get_route(cs, olat, olon):
+    r=_SIM_ROUTES_GUI.get(cs)
+    if not r:
+        r=_route(cs,olat,olon)
+        _SIM_ROUTES_GUI[cs]=r
+    return r
+
+def simulate_sample(t: float, origin_lat: float = 47.3769, origin_lon: float = 8.5417, origin_alt_m: float = 500.0, callsign: str = 'ACFT'):
+    r=_get_route(callsign, origin_lat, origin_lon)
+    el=(t - r['start']); loop=r['loop'] or 1.0; tm=el%loop
+    seg=r['segs'][-1]
+    for s in r['segs']:
+        if s['t0']<=tm<=s['t1']:
+            seg=s; break
+    u=(tm - seg['t0'])/max(1e-6,(seg['t1']-seg['t0']))
+    ue=3*u*u - 2*u*u*u
+    a=seg['a']; b=seg['b']
+    lat=a[0] + (b[0]-a[0])*ue
+    lon=a[1] + (b[1]-a[1])*ue
+    hdg=_brg(a[0],a[1],b[0],b[1])
+    hdg=(hdg + 2.5*sin((el+r['seed'])*0.05))%360
+    spd_kt=float(seg['spd_kt']) + 5.0*sin((el+r['seed'])*0.1)
+    spd_mps=spd_kt*0.514444
+    cruise_extra=800.0 + 600.0*sin(r['seed']*6.28)
+    climb_time=180.0
+    if el < climb_time:
+        alt_m = origin_alt_m + (cruise_extra * (el/climb_time))
+        vsi_ms = cruise_extra/climb_time
+    else:
+        wobble = 80.0 * sin((el - climb_time) * 2*pi / 120.0)
+        alt_m = origin_alt_m + cruise_extra + wobble
+        vsi_ms = (2*pi/120.0) * 80.0 * cos((el - climb_time) * 2*pi / 120.0)
+    hdg_future=(hdg + 5.0*sin((el+0.2+r['seed'])*0.05))%360
+    turn_rate=((hdg_future-hdg+540)%360)-180
+    roll_deg=max(-25.0,min(25.0,turn_rate*3.0))
+    pitch_deg=max(-10.0,min(10.0,degrees(atan2(vsi_ms,max(1.0,spd_mps)))))
     return {
-        "lat": origin_lat + R * (0.8 * math.sin(ang)),
-        "lon": origin_lon + R * (1.2 * math.cos(ang)),
-        "alt_m": origin_alt_m + 50 * math.sin(ang * 2),
-        "spd_kt": 60.0,
-        "vsi_ms": 0.0,
-        "hdg_deg": (ang * 180.0 / math.pi) % 360,
+        'lat':lat,'lon':lon,'alt_m':alt_m,
+        'spd_kt':spd_kt,'vsi_ms':vsi_ms,'hdg_deg':hdg,
+        'pitch_deg':pitch_deg,'roll_deg':roll_deg,
     }
 
 LEVELS = {"DEBUG":10, "INFO":20, "WARN":30, "ERROR":40}
@@ -274,7 +350,7 @@ class BridgeWorker(QThread):
                         self._log("INFO", f"WS connected (demo) to {url}")
                         self.connected.emit(True)
                         while not self._stop.is_set():
-                            s = simulate_sample(time.time(), self._origin_lat, self._origin_lon, self._origin_alt)
+                            s = simulate_sample(time.time(), self._origin_lat, self._origin_lon, self._origin_alt, self._callsign)
                             s["callsign"] = self._callsign
                             s["ts"] = time.time()
                             await ws.send(json.dumps({"type": "state", "payload": s}))
@@ -341,7 +417,7 @@ class BridgeWorker(QThread):
             if self._demo:
                 self.connected.emit(True)
                 try:
-                    s = simulate_sample(time.time(), self._origin_lat, self._origin_lon, self._origin_alt)
+                    s = simulate_sample(time.time(), self._origin_lat, self._origin_lon, self._origin_alt, self._callsign)
                     s["callsign"] = self._callsign
                     s["ts"] = time.time()
                     params = {"key": self._key} if self._key else None
@@ -2326,22 +2402,27 @@ class _SingleInstanceServer:
             sock = self._server.nextPendingConnection()
             if sock is None:
                 return
-            # Read any message (optional)
+            # Read the message to determine action
+            message = 'activate'  # default action
             try:
                 if sock.waitForReadyRead(50):
-                    _ = bytes(sock.readAll()).decode('utf-8', 'ignore')
+                    message = bytes(sock.readAll()).decode('utf-8', 'ignore').strip()
             except Exception:
                 pass
             try:
                 sock.disconnectFromServer()
             except Exception:
                 pass
-        finally:
-            # Bring the window to front
-            try:
-                self._on_activate()
-            except Exception:
-                pass
+            
+            # Only activate the window if explicitly requested
+            # For 'check' messages, we just respond that we exist (by accepting the connection)
+            if message == 'activate':
+                try:
+                    self._on_activate()
+                except Exception:
+                    pass
+        except Exception:
+            pass
 
 
 def _notify_existing_instance(name: str, message: str = 'activate') -> bool:
@@ -2387,10 +2468,31 @@ def main():
     app = QApplication(sys.argv)
     app.setQuitOnLastWindowClosed(False)  # Keep running when window is closed (for tray)
 
-    # Enforce single instance: if another instance exists, ask it to activate and exit
-    if _notify_existing_instance(SINGLE_INSTANCE_NAME, 'activate'):
-        # Existing instance will bring its window to front
-        return 0
+    # Check if another instance exists
+    if _notify_existing_instance(SINGLE_INSTANCE_NAME, 'check'):
+        # Show warning dialog asking user what to do
+        msg = QMessageBox()
+        msg.setIcon(QMessageBox.Warning)
+        msg.setWindowTitle("FlightTracePro Bridge Already Running")
+        msg.setText("There is already an instance of FlightTracePro Bridge running.")
+        msg.setInformativeText("What would you like to do?")
+        
+        # Add custom buttons
+        show_existing_btn = msg.addButton("Show Existing Instance", QMessageBox.ActionRole)
+        run_anyway_btn = msg.addButton("Run Another Instance Anyway", QMessageBox.ActionRole)
+        cancel_btn = msg.addButton("Cancel", QMessageBox.RejectRole)
+        
+        msg.setDefaultButton(show_existing_btn)
+        msg.exec()
+        
+        if msg.clickedButton() == show_existing_btn:
+            # Activate the existing instance and exit
+            _notify_existing_instance(SINGLE_INSTANCE_NAME, 'activate')
+            return 0
+        elif msg.clickedButton() == cancel_btn:
+            # User chose to cancel, exit
+            return 0
+        # If "Run Another Instance Anyway" was clicked, continue with startup
     
     try:
         win = MainWindow()
